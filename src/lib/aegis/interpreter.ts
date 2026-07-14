@@ -379,6 +379,7 @@ class Parser {
     return { n: "ForIn", var: v, iter: iter!, body, line };
   }
   parseBlock(): Stmt[] {
+    if (!this.enterDepth("block")) return [];
     this.expect("{", "'{'");
     const body: Stmt[] = [];
     while (!this.check("}") && !this.check("eof")) {
@@ -409,6 +410,7 @@ class Parser {
       else { this.next(); }
     }
     this.expect("}", "'}'");
+    this.exitDepth();
     return body;
   }
   parseExpr(): Expr | null {
@@ -671,157 +673,300 @@ class Parser {
 }
 
 // ---------------------------------------------------------------------------
-// Static capability & safety analyzer
+// Capability-value tracking and static safety analyzer (Phase 5 redesign)
 // ---------------------------------------------------------------------------
-// Gated methods: the full chain must match one of these.
-// We check the FULL method chain (e.g. "env.fs.read"), not just the last
-// two components. The old code only checked "fs.read" which meant
-// "env.fs.read(...)" bypassed the check entirely.
-const GATED_METHODS = new Set([
+// PHASE 5: The capability model now tracks VALUES, not names.
+// A variable is "cap-tagged" if it holds a value derived from a Cap parameter.
+// The tag propagates through: aliasing (let e = env), field access (env.fs),
+// array/map elements, function parameters (interprocedural fixpoint), and
+// closure captures.
+//
+// The gate checks whether the receiver resolves to a cap-tagged value,
+// NOT whether the variable name matches "env" or "cap". This defeats the
+// aliasing attack from the second adversarial review: `let e = env; e.fs.read()`
+// is allowed (capability flowed through alias) but `fn sneaky(x) { x.fs.read() }`
+// called without a cap arg is rejected (x is not cap-tagged).
+//
+// The runtime backstop (in evalMethod) independently verifies the capability
+// marker on Module values, so even an analyzer miss fails closed.
+
+const GATED_FULL = new Set([
   "fs.read", "fs.write", "fs.list",
   "net.fetch", "net.post", "net.serve",
   "shell.run",
   "db.query",
   "env.get", "env.set",
 ]);
+// Gated method NAMES — these are reserved for capability modules.
+// Calling any of these on a non-capability-tagged value is rejected.
+// NOTE: "get"/"set" are NOT here because they're too generic (Map.get, etc.).
+// They're only gated via the full chain "env.get"/"env.set" in GATED_FULL.
+const GATED_NAMES = new Set([
+  "read", "write", "list", "fetch", "post", "serve", "run", "query",
+]);
 
-// Extract the full method chain from an expression: `env.fs.read` -> "env.fs.read"
+// Extract the full method chain: `env.fs` -> "env.fs", `alias.net` -> "alias.net"
 function methodChain(e: Expr): string {
   if (e.n === "Ident") return e.name;
   if (e.n === "Field") return methodChain(e.recv) + "." + e.name;
   return "";
 }
 
-// Extract the module + method: `env.fs` -> "fs", `fs` -> "fs", `env.db` -> "db"
-// Strips the leading "env" or "cap" prefix if present.
-function methodModule(e: Expr): string {
-  const chain = methodChain(e);
-  const parts = chain.split(".");
-  // Strip leading "env" or "cap" — these are capability carrier names,
-  // not module names. "env.fs" -> "fs", "cap.net" -> "net".
-  if (parts.length >= 2 && (parts[0] === "env" || parts[0] === "cap")) {
-    return parts.slice(1).join(".");
-  }
-  return chain;
+// Check if an expression resolves to a capability-tagged value.
+// A value is cap-tagged if:
+//  - It's a variable in capVars
+//  - It's a field access on a cap-tagged expression (env.fs is cap if env is)
+//  - It's an index access on a cap-tagged expression (arr[0] is cap if arr is)
+function isCapExpr(e: Expr, capVars: Set<string>): boolean {
+  if (e.n === "Ident") return capVars.has(e.name);
+  if (e.n === "Field") return isCapExpr(e.recv, capVars);
+  if (e.n === "Index") return isCapExpr(e.arr, capVars);
+  return false;
 }
 
 function analyze(items: Item[]): Diag[] {
   const diags: Diag[] = [];
-  // `locals` is the set of variables declared in the current scope.
-  // `ownScope` is the set of variables declared in THIS function/block (not captured).
-  // When we enter a Closure, captured variables are in `locals` but NOT in `ownScope`.
-  // An Assign to a variable NOT in `ownScope` is a mutation of a captured variable,
-  // which is rejected (closures capture by value; mutation would silently no-op).
-  function walkStmts(stmts: Stmt[], hasCap: boolean, locals: Set<string>, ownScope: Set<string>) {
-    for (const s of stmts) walkStmt(s, hasCap, locals, ownScope);
-  }
-  function walkStmt(s: Stmt, hasCap: boolean, locals: Set<string>, ownScope: Set<string>) {
-    if (s.n === "Let") { walkExpr(s.expr, hasCap, locals, ownScope); locals.add(s.name); ownScope.add(s.name); }
-    else if (s.n === "Expr") walkExpr(s.expr, hasCap, locals, ownScope);
-    else if (s.n === "Return") { if (s.expr) walkExpr(s.expr, hasCap, locals, ownScope); }
-    else if (s.n === "Fn") {
-      let hc = s.hasCap; const ls = new Set<string>(locals); const os = new Set<string>();
-      for (const p of s.params) { ls.add(p.name); os.add(p.name); if (p.ty === "Cap" || p.ty.startsWith("Cap<")) hc = true; }
-      walkStmts(s.body, hc, ls, os);
+
+  // --- Collect functions ---
+  const fns = new Map<string, Extract<Item, { n: "Fn" }>>();
+  for (const it of items) if (it.n === "Fn") fns.set(it.name, it);
+
+  // --- Initialize cap-tagged params from Cap type annotations ---
+  // capTaggedParams: fn name -> set of param names that are cap-tagged
+  const capTaggedParams = new Map<string, Set<string>>();
+  for (const [name, fn] of fns) {
+    const caps = new Set<string>();
+    for (const p of fn.params) {
+      if (p.ty === "Cap" || p.ty.startsWith("Cap<")) caps.add(p.name);
     }
-    else if (s.n === "ForIn") { walkExpr(s.iter, hasCap, locals, ownScope); const ls = new Set(locals); ls.add(s.var); const os = new Set(ownScope); os.add(s.var); walkStmts(s.body, hasCap, ls, os); }
-    else if (s.n === "Assign") {
-      walkExpr(s.expr, hasCap, locals, ownScope);
-      // Reject mutation of captured variables (variables in scope but not
-      // declared in this function/block). This would silently no-op because
-      // closures capture by value (copy of env).
-      if (!ownScope.has(s.name)) {
-        diags.push({ kind: "error", phase: "check", line: s.line, col: 0, msg: `Cannot assign to captured variable '${s.name}'. Closures capture by value; mutation of captured variables is not supported. Pass the variable as a parameter and return the new value instead.` });
-      }
+    capTaggedParams.set(name, caps);
+  }
+
+  // --- Fixpoint: propagate cap-tagged values through call sites ---
+  // A function's param becomes cap-tagged if ANY call site passes a cap-tagged arg.
+  // This is interprocedural dataflow: the capability follows the value, not the name.
+  let changed = true;
+  let iters = 0;
+  while (changed && iters < 100) {
+    changed = false;
+    iters++;
+    for (const [name, fn] of fns) {
+      const capVars = new Set(capTaggedParams.get(name)!);
+      propagateCap(fn.body, capVars, (calleeName: string, argCaps: boolean[]) => {
+        const callee = fns.get(calleeName);
+        if (!callee) return;
+        for (let i = 0; i < argCaps.length && i < callee.params.length; i++) {
+          if (argCaps[i]) {
+            const pn = callee.params[i].name;
+            const cc = capTaggedParams.get(calleeName)!;
+            if (!cc.has(pn)) { cc.add(pn); changed = true; }
+          }
+        }
+      });
     }
   }
-  function walkExpr(e: Expr, hasCap: boolean, locals: Set<string>, ownScope: Set<string>) {
+
+  // --- Final diagnostic walk ---
+  for (const [name, fn] of fns) {
+    const capVars = new Set(capTaggedParams.get(name)!);
+    const locals = new Set(capVars);
+    for (const p of fn.params) locals.add(p.name);
+    const ownScope = new Set(fn.params.map((p) => p.name));
+    walkStmts(fn.body, capVars, locals, ownScope);
+  }
+  // Walk top-level non-fn items
+  for (const it of items) {
+    if (it.n === "Fn" || it.n === "Struct" || it.n === "Impl") continue;
+    walkStmt(it, new Set(), new Set(), new Set());
+  }
+  return diags;
+
+  // --- Propagation walk (fixpoint: track capVars, report call sites) ---
+  function propagateCap(stmts: Stmt[], capVars: Set<string>, onCall: (n: string, ac: boolean[]) => void) {
+    for (const s of stmts) propStmt(s, capVars, onCall);
+  }
+  function propStmt(s: Stmt, capVars: Set<string>, onCall: (n: string, ac: boolean[]) => void) {
+    if (s.n === "Let") {
+      propExpr(s.expr, capVars, onCall);
+      if (isCapExpr(s.expr, capVars)) capVars.add(s.name);
+    } else if (s.n === "Expr") {
+      propExpr(s.expr, capVars, onCall);
+    } else if (s.n === "Return") {
+      if (s.expr) propExpr(s.expr, capVars, onCall);
+    } else if (s.n === "Fn") {
+      const nested = new Set(capVars);
+      for (const p of s.params) { if (p.ty === "Cap" || p.ty.startsWith("Cap<")) nested.add(p.name); }
+      propagateCap(s.body, nested, onCall);
+    } else if (s.n === "ForIn") {
+      propExpr(s.iter, capVars, onCall);
+      propagateCap(s.body, new Set(capVars), onCall);
+    } else if (s.n === "Assign") {
+      propExpr(s.expr, capVars, onCall);
+      if (isCapExpr(s.expr, capVars)) capVars.add(s.name);
+    }
+  }
+  function propExpr(e: Expr, capVars: Set<string>, onCall: (n: string, ac: boolean[]) => void) {
     if (!e) return;
     switch (e.n) {
-      case "Bin": walkExpr(e.l, hasCap, locals, ownScope); walkExpr(e.r, hasCap, locals, ownScope); break;
-      case "Unary": walkExpr(e.e, hasCap, locals, ownScope); break;
+      case "Bin": propExpr(e.l, capVars, onCall); propExpr(e.r, capVars, onCall); break;
+      case "Unary": propExpr(e.e, capVars, onCall); break;
       case "Call":
-        walkExpr(e.callee, hasCap, locals, ownScope);
-        for (const a of e.args) walkExpr(a, hasCap, locals, ownScope);
+        if (e.callee.n === "Ident") onCall(e.callee.name, e.args.map((a) => isCapExpr(a, capVars)));
+        propExpr(e.callee, capVars, onCall);
+        for (const a of e.args) propExpr(a, capVars, onCall);
         break;
-      case "Method":
-        walkExpr(e.recv, hasCap, locals, ownScope);
-        {
-          // Check the full method chain: `env.fs.read` -> "fs.read"
-          const mod = methodModule(e.recv);
-          const fullName = mod + "." + e.name;
-          // Capability gate: fs.read, net.fetch, shell.run, db.query, etc.
-          if (GATED_METHODS.has(fullName) && !hasCap) {
-            diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: `Call to '${fullName}' requires a capability (Cap) in scope — no ambient authority. Pass 'env' (or a Cap parameter) into this function.` });
-          }
-          // db.query: must be exactly 2 args, template must be plain StrLit.
-          if (fullName === "db.query") {
-            if (e.args.length !== 2) {
-              diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "db.query requires exactly 2 arguments: (template, params). Single-string form is forbidden — it enables SQL injection." });
-            } else {
-              const tpl = e.args[0];
-              if (tpl.n !== "StrLit" || tpl.parts.some((p: any) => p.expr && p.expr.trim())) {
-                diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "db.query template must be a plain string literal (no concatenation, no interpolation). Use ? placeholders and pass values in the params array." });
-              }
-            }
-          }
-          // shell.run: must be 1 arg that is an Array of StrLit elements.
-          if (fullName === "shell.run") {
-            if (e.args.length !== 1 || e.args[0].n !== "Array") {
-              diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "shell.run requires a single array argument: shell.run([\"cmd\", \"arg1\"]). String form is forbidden — it enables command injection." });
-            } else {
-              for (const el of e.args[0].elems) {
-                if (el.n !== "StrLit" || el.parts.some((p: any) => p.expr && p.expr.trim())) {
-                  diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "shell.run array elements must be plain string literals. Variables or expressions in argv slots could smuggle shell metacharacters." });
-                }
-              }
-            }
-          }
-        }
-        for (const a of e.args) walkExpr(a, hasCap, locals, ownScope);
-        break;
-      case "Field": walkExpr(e.recv, hasCap, locals, ownScope); break;
-      case "Index": walkExpr(e.arr, hasCap, locals, ownScope); walkExpr(e.idx, hasCap, locals, ownScope); break;
-      case "Array": for (const el of e.elems) walkExpr(el, hasCap, locals, ownScope); break;
-      case "MapLit": for (const p of e.pairs) walkExpr(p.val, hasCap, locals, ownScope); break;
-      case "If": walkExpr(e.cond, hasCap, locals, ownScope); walkStmts(e.then, hasCap, locals, ownScope); if (e.els) walkStmts(e.els, hasCap, locals, ownScope); break;
-      case "Match": walkExpr(e.scrut, hasCap, locals, ownScope); for (const a of e.arms) walkStmts(a.body, hasCap, new Set(locals), new Set(ownScope)); break;
-      case "Block": walkStmts(e.body, hasCap, locals, ownScope); break;
-      case "Try": walkExpr(e.e, hasCap, locals, ownScope); break;
-      case "Some": case "Ok": case "Err": walkExpr(e.e, hasCap, locals, ownScope); break;
-      case "StructLit":
-        // Reject forged Module structs — users must not be able to construct
-        // `Module { __mod: "fs" }` to get a fake capability.
-        if (e.name === "Module" || e.name === "Env" || e.name === "TaskHandle") {
-          diags.push({ kind: "error", phase: "check", line: e.line, col: 0, msg: `Cannot construct a forged '${e.name}' value. Capability modules are only available through the 'env' parameter passed to main.` });
-        }
-        for (const f of e.fields) walkExpr(f.val, hasCap, locals, ownScope);
-        break;
-      case "Closure":
-        // Closures capture by value (copy of env). They get a fresh ownScope
-        // (only their params and local lets). Mutation of captured variables
-        // is rejected in walkStmt Assign.
-        // If `env` or a `cap` variable is in the captured locals, the closure
-        // inherits the capability (it can use env.fs.read etc.).
-        {
-          let closureHasCap = false;
-          for (const l of locals) {
-            if (l === "env" || l === "cap") { closureHasCap = true; break; }
-          }
-          walkStmts(e.body, closureHasCap, new Set(locals), new Set());
-        }
-        break;
+      case "Method": propExpr(e.recv, capVars, onCall); for (const a of e.args) propExpr(a, capVars, onCall); break;
+      case "Field": propExpr(e.recv, capVars, onCall); break;
+      case "Index": propExpr(e.arr, capVars, onCall); propExpr(e.idx, capVars, onCall); break;
+      case "Array": for (const el of e.elems) propExpr(el, capVars, onCall); break;
+      case "MapLit": for (const p of e.pairs) propExpr(p.val, capVars, onCall); break;
+      case "If": propExpr(e.cond, capVars, onCall); propagateCap(e.then, new Set(capVars), onCall); if (e.els) propagateCap(e.els, new Set(capVars), onCall); break;
+      case "Match": propExpr(e.scrut, capVars, onCall); for (const a of e.arms) propagateCap(a.body, new Set(capVars), onCall); break;
+      case "Block": propagateCap(e.body, new Set(capVars), onCall); break;
+      case "Try": propExpr(e.e, capVars, onCall); break;
+      case "Some": case "Ok": case "Err": propExpr(e.e, capVars, onCall); break;
+      case "StructLit": for (const f of e.fields) propExpr(f.val, capVars, onCall); break;
+      case "Closure": propagateCap(e.body, new Set(capVars), onCall); break;
       case "StrLit": {
-        // CRITICAL FIX: walk interpolated expressions inside string literals.
-        // The old code didn't walk StrLit at all, so `"{env.fs.read(\"x\")}"`
-        // bypassed the capability analyzer entirely.
         for (const part of e.parts) {
           if (part.expr && part.expr.trim()) {
             const { toks } = tokenize(part.expr);
             const pp = new Parser(toks);
             const inner = pp.parseExpr();
-            if (inner) walkExpr(inner, hasCap, locals, ownScope);
-            // Also surface any parse errors from the interpolated expression
+            if (inner) propExpr(inner, capVars, onCall);
+          }
+        }
+        break;
+      }
+    }
+  }
+
+  // --- Diagnostic walk (emit errors for gate violations) ---
+  function walkStmts(stmts: Stmt[], capVars: Set<string>, locals: Set<string>, ownScope: Set<string>) {
+    for (const s of stmts) walkStmt(s, capVars, locals, ownScope);
+  }
+  function walkStmt(s: Stmt, capVars: Set<string>, locals: Set<string>, ownScope: Set<string>) {
+    if (s.n === "Let") {
+      walkExpr(s.expr, capVars, locals, ownScope);
+      locals.add(s.name); ownScope.add(s.name);
+      if (isCapExpr(s.expr, capVars)) capVars.add(s.name);
+    } else if (s.n === "Expr") {
+      walkExpr(s.expr, capVars, locals, ownScope);
+    } else if (s.n === "Return") {
+      if (s.expr) walkExpr(s.expr, capVars, locals, ownScope);
+    } else if (s.n === "Fn") {
+      const ls = new Set(locals); const os = new Set<string>();
+      const fnCapVars = new Set(capVars);
+      for (const p of s.params) { ls.add(p.name); os.add(p.name); if (p.ty === "Cap" || p.ty.startsWith("Cap<")) fnCapVars.add(p.name); }
+      walkStmts(s.body, fnCapVars, ls, os);
+    } else if (s.n === "ForIn") {
+      walkExpr(s.iter, capVars, locals, ownScope);
+      const ls = new Set(locals); ls.add(s.var);
+      const os = new Set(ownScope); os.add(s.var);
+      walkStmts(s.body, new Set(capVars), ls, os);
+    } else if (s.n === "Assign") {
+      walkExpr(s.expr, capVars, locals, ownScope);
+      if (!ownScope.has(s.name)) {
+        diags.push({ kind: "error", phase: "check", line: s.line, col: 0, msg: `Cannot assign to captured variable '${s.name}'. Closures capture by value; mutation of captured variables is not supported. Pass the variable as a parameter and return the new value instead.` });
+      }
+      if (isCapExpr(s.expr, capVars)) capVars.add(s.name);
+    }
+  }
+  function walkExpr(e: Expr, capVars: Set<string>, locals: Set<string>, ownScope: Set<string>) {
+    if (!e) return;
+    switch (e.n) {
+      case "Bin": walkExpr(e.l, capVars, locals, ownScope); walkExpr(e.r, capVars, locals, ownScope); break;
+      case "Unary": walkExpr(e.e, capVars, locals, ownScope); break;
+      case "Call":
+        walkExpr(e.callee, capVars, locals, ownScope);
+        for (const a of e.args) walkExpr(a, capVars, locals, ownScope);
+        break;
+      case "Method":
+        walkExpr(e.recv, capVars, locals, ownScope);
+        {
+          const chain = methodChain(e.recv);
+          const parts = chain.split(".");
+          const hasModuleName = parts.length >= 2;
+          const rootIsCap = isCapExpr(e.recv, capVars);
+          const modName = hasModuleName ? parts[parts.length - 1] : null;
+          const fullName = modName ? modName + "." + e.name : e.name;
+          const isModuleCall = hasModuleName || rootIsCap;
+
+          // Capability gate: gated method on a module chain requires cap-tagged root.
+          // This defeats aliasing: `let e = env; e.fs.read()` is allowed because
+          // `e` is cap-tagged (it was assigned from `env`). But `fn f(x) { x.fs.read() }`
+          // called without a cap arg is rejected because `x` is not cap-tagged.
+          if (GATED_FULL.has(fullName) && !rootIsCap) {
+            diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: `Call to '${fullName}' requires a capability in scope — the receiver does not resolve to a capability-tagged value. No ambient authority.` });
+          }
+          // Also gate on bare gated method names (e.g. `fs.read(...)` where fs
+          // is a bare identifier, or `m.read(...)` where m is not cap-tagged).
+          // These names are reserved for capability modules.
+          if (parts.length <= 1 && GATED_NAMES.has(e.name) && !rootIsCap) {
+            diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: `Call to '${e.name}' requires a capability in scope — '${e.name}' is a reserved capability method name. No ambient authority.` });
+          }
+
+          // Injection checks (only for Module calls — prevents false positives on user structs)
+          if (isModuleCall) {
+            if (e.name === "query") {
+              if (e.args.length !== 2) {
+                diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "db.query requires exactly 2 arguments: (template, params). Single-string form is forbidden — it enables SQL injection." });
+              } else {
+                const tpl = e.args[0];
+                if (tpl.n !== "StrLit" || tpl.parts.some((p: any) => p.expr && p.expr.trim())) {
+                  diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "db.query template must be a plain string literal (no concatenation, no interpolation). Use ? placeholders and pass values in the params array." });
+                }
+              }
+            }
+            if (e.name === "run") {
+              if (e.args.length !== 1 || e.args[0].n !== "Array") {
+                diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "shell.run requires a single array argument: shell.run([\"cmd\", \"arg1\"]). String form is forbidden — it enables command injection." });
+              } else {
+                for (const el of e.args[0].elems) {
+                  if (el.n !== "StrLit" || el.parts.some((p: any) => p.expr && p.expr.trim())) {
+                    diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "shell.run array elements must be plain string literals. Variables or expressions in argv slots could smuggle shell metacharacters." });
+                  }
+                }
+              }
+            }
+          }
+        }
+        for (const a of e.args) walkExpr(a, capVars, locals, ownScope);
+        break;
+      case "Field": walkExpr(e.recv, capVars, locals, ownScope); break;
+      case "Index": walkExpr(e.arr, capVars, locals, ownScope); walkExpr(e.idx, capVars, locals, ownScope); break;
+      case "Array": for (const el of e.elems) walkExpr(el, capVars, locals, ownScope); break;
+      case "MapLit": for (const p of e.pairs) walkExpr(p.val, capVars, locals, ownScope); break;
+      case "If": walkExpr(e.cond, capVars, locals, ownScope); walkStmts(e.then, new Set(capVars), locals, ownScope); if (e.els) walkStmts(e.els, new Set(capVars), locals, ownScope); break;
+      case "Match": walkExpr(e.scrut, capVars, locals, ownScope); for (const a of e.arms) walkStmts(a.body, new Set(capVars), new Set(locals), new Set(ownScope)); break;
+      case "Block": walkStmts(e.body, new Set(capVars), locals, ownScope); break;
+      case "Try": walkExpr(e.e, capVars, locals, ownScope); break;
+      case "Some": case "Ok": case "Err": walkExpr(e.e, capVars, locals, ownScope); break;
+      case "StructLit":
+        // Reject forged Module/Env/TaskHandle structs
+        if (e.name === "Module" || e.name === "Env" || e.name === "TaskHandle") {
+          diags.push({ kind: "error", phase: "check", line: e.line, col: 0, msg: `Cannot construct a forged '${e.name}' value. Capability modules are only available through the 'env' parameter passed to main.` });
+        }
+        for (const f of e.fields) walkExpr(f.val, capVars, locals, ownScope);
+        break;
+      case "Closure": {
+        // Closures capture the current capVars (capability flows through capture).
+        // FIX #7: closure params are added to ownScope so they can be reassigned.
+        const cCapVars = new Set(capVars);
+        const cLocals = new Set(capVars);
+        const cOwnScope = new Set(e.params);
+        for (const p of e.params) cLocals.add(p);
+        walkStmts(e.body, cCapVars, cLocals, cOwnScope);
+        break;
+      }
+      case "StrLit": {
+        // Walk interpolated expressions inside string literals
+        for (const part of e.parts) {
+          if (part.expr && part.expr.trim()) {
+            const { toks } = tokenize(part.expr);
+            const pp = new Parser(toks);
+            const inner = pp.parseExpr();
+            if (inner) walkExpr(inner, capVars, locals, ownScope);
             for (const d of pp.diags) diags.push(d);
           }
         }
@@ -829,8 +974,6 @@ function analyze(items: Item[]): Diag[] {
       }
     }
   }
-  for (const it of items) walkStmt(it, false, new Set(), new Set());
-  return diags;
 }
 
 // ---------------------------------------------------------------------------
@@ -895,16 +1038,20 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
   const globals: Env = new Map();
   const structDefs = new Map<string, { name: string; fields: { name: string; ty: string }[] }>();
   const impls = new Map<string, Map<string, any>>();
-  const capObj: Val = { k: "cap", label: "fs,net,shell,db,env" };
-  const makeModule = (name: string): Val => ({ k: "struct", name: "Module", fields: { __cap: capObj, __mod: { k: "str", v: name } } });
+  // RUNTIME BACKSTOP: Each Module's __cap carries a session-specific token
+  // (moduleName:sessionSecret). User code cannot forge this because:
+  // 1. There is no `cap` literal in the language — user code can't create { k: "cap" } values.
+  // 2. Even if they extract env.fs.__cap and put it in a forged Module{__mod:"net"},
+  //    the label "fs:secret" won't match "net:secret" — the runtime check rejects it.
+  // This means even an analyzer miss fails closed: forged or mistagged modules
+  // are rejected at runtime.
+  const sessionSecret = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  const makeCap = (modName: string): Val => ({ k: "cap", label: modName + ":" + sessionSecret });
+  const makeModule = (name: string): Val => ({ k: "struct", name: "Module", fields: { __cap: makeCap(name), __mod: { k: "str", v: name } } });
   // CRITICAL FIX: `env` is NOT a global. It exists ONLY in main's local scope
   // when main declares a Cap parameter. This means a function that does not
-  // receive `env` as a parameter cannot reach `fs`/`net`/`shell`/`db` at all —
-  // the identifier `env` is simply undefined in that scope.
-  // The old code put `env` in globals, which made the capability model
-  // bypassable: any function could reference `env.fs.read(...)` at runtime
-  // even if the analyzer failed to catch it.
-  const envObj: Val = { k: "struct", name: "Env", fields: { fs: makeModule("fs"), net: makeModule("net"), shell: makeModule("shell"), db: makeModule("db"), __cap: capObj } };
+  // receive `env` as a parameter cannot reach `fs`/`net`/`shell`/`db` at all.
+  const envObj: Val = { k: "struct", name: "Env", fields: { fs: makeModule("fs"), net: makeModule("net"), shell: makeModule("shell"), db: makeModule("db"), __cap: makeCap("env") } };
   globals.set("print", { k: "fn", name: "print", params: [], body: [], closure: new Map(), caps: false });
   globals.set("sqrt", { k: "fn", name: "sqrt", params: ["x"], body: [], closure: new Map(), caps: false });
   globals.set("len", { k: "fn", name: "len", params: ["x"], body: [], closure: new Map(), caps: false });
@@ -940,7 +1087,21 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
     }
   };
 
+  let evalDepth = 0;
+  const MAX_EVAL_DEPTH = 512;
   const evalExpr = (e: Expr, env: Env): Val => {
+    evalDepth++;
+    if (evalDepth > MAX_EVAL_DEPTH) {
+      evalDepth--;
+      throw new EvalErr(`Maximum evaluation depth (${MAX_EVAL_DEPTH}) exceeded. Possible infinite recursion or deeply nested expression.`, 0, 0);
+    }
+    try {
+      return evalExprInner(e, env);
+    } finally {
+      evalDepth--;
+    }
+  };
+  const evalExprInner = (e: Expr, env: Env): Val => {
     switch (e.n) {
       case "IntLit": return { k: "int", v: e.v };
       case "FloatLit": return { k: "float", v: e.v };
@@ -1077,8 +1238,19 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
           if (isFloat) return { k: "float", v: li * ri };
           return checkedMul(li, ri);
         }
-        case "/": { if (ri === 0) return { k: "err", v: { k: "str", v: "division by zero" } }; return isFloat ? { k: "float", v: li / ri } : { k: "int", v: Math.trunc(li / ri) }; }
-        case "%": { if (ri === 0) return { k: "err", v: { k: "str", v: "modulo by zero" } }; return { k: "int", v: li % ri }; }
+        case "/": {
+          if (ri === 0) return { k: "err", v: { k: "str", v: "division by zero" } };
+          if (isFloat) return { k: "float", v: li / ri };
+          // INT_MIN / -1 = INT_MAX + 1 which overflows
+          if (li === INT_MIN && ri === -1) return { k: "err", v: { k: "str", v: "integer overflow on '/' (INT_MIN / -1)" } };
+          return { k: "int", v: Math.trunc(li / ri) };
+        }
+        case "%": {
+          if (ri === 0) return { k: "err", v: { k: "str", v: "modulo by zero" } };
+          // INT_MIN % -1 = 0 in math, but check for safety
+          if (li === INT_MIN && ri === -1) return { k: "int", v: 0 };
+          return { k: "int", v: li % ri };
+        }
       }
     }
     if (l.k === "str" && e.op === "+") return { k: "str", v: l.v + (r.k === "str" ? r.v : valToStr(r)) };
@@ -1202,9 +1374,21 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
 
   function evalMethod(e: Extract<Expr, { n: "Method" }>, env: Env): Val {
     const recv = evalExpr(e.recv, env);
-    // capability-gated modules
+    // RUNTIME BACKSTOP: Verify capability tag on Module-typed receivers.
+    // Even if the static analyzer misses something, this check ensures
+    // that only legitimately-obtained Module values can execute privileged
+    // methods. A forged Module (constructed via StructLit) won't have a
+    // valid __cap with the correct session secret.
     if (recv.k === "struct" && recv.name === "Module") {
       const mod = recv.fields.__mod.v as string;
+      const cap = recv.fields.__cap;
+      // Verify the cap is a valid capability value with the correct session secret.
+      // User code cannot create { k: "cap" } values — they only come from the runtime.
+      // And the label must match "moduleName:sessionSecret" to prevent cross-module
+      // cap extraction (stealing fs's cap and using it for net).
+      if (!cap || cap.k !== "cap" || cap.label !== mod + ":" + sessionSecret) {
+        throw new EvalErr(`Runtime backstop: Module '${mod}' has an invalid or forged capability tag. Method '${e.name}' refused.`, e.line, e.col);
+      }
       if (mod === "fs" && e.name === "read") return { k: "ok", v: { k: "str", v: "[file contents]" } };
       if (mod === "net" && e.name === "fetch") return { k: "ok", v: { k: "str", v: "[network response]" } };
       if (mod === "net" && e.name === "post") return { k: "ok", v: { k: "str", v: "[posted]" } };
