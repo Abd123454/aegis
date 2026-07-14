@@ -177,3 +177,35 @@ Stage Summary:
 - 74/74 tests pass in CI. Every PoC from the review is rejected.
 - README updated with honest status: 11 fixed-and-reverified, 1 partially mitigated.
 - Explicitly flagged: these fixes were written by the same agent that needs a second independent review before claims can be trusted again.
+
+---
+Task ID: 5-phase
+Agent: orchestrator
+Task: Phase 5 — redesign capability model to track VALUES not names. Second fix attempt for ambient-authority.
+
+Work Log:
+- Second adversarial review found Phase 4 was name-based: aliasing env to `e`/`alias`/`myenv` defeated all gates.
+- Core redesign: capability-value tracking via interprocedural fixpoint.
+  * isCapExpr(e, capVars): checks if expression resolves to a cap-tagged value, not if name matches "env".
+  * Fixpoint propagation: cap-tagged args at call sites propagate to callee params, regardless of param name.
+  * Gate: Method calls on fs/net/shell/db allowed only when receiver resolves to cap-tagged value.
+  * Runtime backstop: each Module's __cap carries moduleName:sessionSecret; forged/mistagged modules rejected at runtime.
+- Fixed depth limit bugs:
+  * parseBlock had enterDepth but when it failed, didn't consume tokens → infinite loop. Fixed: skip block on depth exceed.
+  * parseArgs had no null-check on parseExpr return → infinite loop on depth limit. Fixed: skip token when parseExpr returns null.
+- Fixed overflow on / and %: INT_MIN / -1 returns Err.
+- Fixed closure ownScope: closure params added to ownScope (fix #7).
+- Added 22 aliased adversarial tests in tests/phase5-aliased.test.ts.
+- All 96 tests pass (17 security + 17 brevity + 7 domain + 9 regression + 24 phase-4 adversarial + 22 phase-5 aliased). 0 failures.
+- Ran every PoC from both reviews individually: 30/30 verified. 0 failures.
+- CI passes on GitHub (latest run: success).
+- Pushed to https://github.com/Abd123454/aegis
+
+PoC-by-PoC verification results (all 30):
+Review 1: A1✓ A3✓ A4✓ I1✓ I2✓ F1✓ F2✓ F3✓ S1✓ S2✓ S3✓ O1✓ O3✓ O5✓ D1✓ L12✓ C1✓ (17/17)
+Review 2: AMBIENT-A✓ AMBIENT-B✓ AMBIENT-C✓ AMBIENT-D✓ SQL-A✓ SQL-B✓ CMD-A✓ CMD-B✓ INT-A✓ INT-B✓ CLOS-A✓ NEST-A✓ NEST-B✓ (13/13)
+
+Stage Summary:
+- This is the SECOND fix attempt for ambient-authority. If a third review finds it incomplete, the capability model needs a fundamental type-system-level redesign (e.g. a real capability type with linear/affine properties), not a third name-based patch.
+- A third independent review (fresh context) should be commissioned, focused on whether capability-value tracking holds under aliasing, indirection, and the runtime backstop.
+- SECURITY: User's PAT used for push. Token passed only as env var. Remote URL cleaned. User advised to revoke.
