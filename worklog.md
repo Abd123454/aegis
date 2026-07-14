@@ -242,3 +242,43 @@ Stage Summary:
 - If a fourth review finds this incomplete, the flaw would be in the type system itself (unsound rule, bad coercion, runtime shape without type), NOT in a missing expression form.
 - A fourth independent review should be commissioned with a different brief: hunt for type-system unsoundness, not missing expression forms.
 - SECURITY: User's PAT used for push. Token passed only as env var. Remote URL cleaned.
+
+---
+Task ID: 7-phase
+Agent: orchestrator
+Task: Phase 7 — fix missing argument-type check. Fifth attempt at ambient-authority.
+
+Work Log:
+- Fourth review found two unsound typing rules in Phase 6 type system:
+  1. Gate allowed gated method names on user structs without checking impl membership
+  2. Type checker never checked call-site argument types against declared param types
+- Fix A: Built implMethods table (structName -> Set<methodName>). Gate's user-struct
+  branch now checks the struct actually implements the method.
+- Fix B: Added typesCompatible(argTy, paramTy). Cap types are NOT compatible with
+  struct types. Check applied at every Call site comparing inferType(arg) to param type.
+- P1a: Added depth tracking to walkExpr (256 max). Closes NEST-B analyzer crash.
+- P1b: Reject integer literals >2147483647 at parse time. Special-case -2147483648
+  in parseUnary (produces IntLit(-2147483648) directly).
+- P2: Null-checks before inferType in walkStmt Let/Assign cases.
+- Added 20 regression tests in tests/phase7-typeconfusion.test.ts:
+  * LIE-9, BYPASS-clean, BYPASS-verify, BYPASS-verify-shell
+  * SQL-INJECTION-FULL, CMD-INJECTION-FULL, NET-FETCH-FULL
+  * NEST-B (1000 additions), CRASH-1/2/4
+  * LEGIT-read/fetch/run/query (false-positive checks)
+  * LIT-1/2/3/4 (integer literal range)
+- All 130 tests pass. 0 failures.
+- 46/46 PoCs from all 4 reviews verified individually:
+  * Review 1: 17/17
+  * Review 2: 13/13
+  * Review 3: 5/5
+  * Review 4: 11/11
+- CI passes on GitHub (success).
+- Pushed to https://github.com/Abd123454/aegis
+
+Stage Summary:
+- This is the FIFTH attempt. Unlike rounds 1-3, this is a genuine missing basic
+  type-check, not an enumeration gap. The Phase 6 type system was structurally
+  correct; it just needed standard call-site type-checking.
+- A fifth independent review should re-attempt type-confusion with variations
+  Fix A/B might not cover (Option<MyStruct>, generic collections, multi-layer indirection).
+- SECURITY: User's PAT used for push. Token passed only as env var. Remote URL cleaned.
