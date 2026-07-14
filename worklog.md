@@ -282,3 +282,39 @@ Stage Summary:
 - A fifth independent review should re-attempt type-confusion with variations
   Fix A/B might not cover (Option<MyStruct>, generic collections, multi-layer indirection).
 - SECURITY: User's PAT used for push. Token passed only as env var. Remote URL cleaned.
+
+---
+Task ID: 8-phase
+Agent: orchestrator
+Task: Phase 8 — comprehensive type annotation audit. Sixth attempt at ambient-authority.
+
+Work Log:
+- Round 5 found function return types were declared but never checked — same bug as Phase 7, mirrored.
+- Phase 8 is a comprehensive audit of ALL type annotation sites, not just returns.
+- Annotation site coverage table:
+  1. Function parameters — Yes (Phase 7)
+  2. Function return types — Yes (Phase 8) NEW
+  3. Struct field declarations — Yes (Phase 8) NEW
+  4. Typed let bindings — Yes (Phase 8) NEW
+  5. Impl method parameters — Yes (Phase 8) NEW (bodies were never walked)
+  6. Impl method return types — Yes (Phase 8) NEW
+  7. Closure parameters — N/A (no type annotations in Aegis)
+  8. Closure return types — N/A (no type annotations in Aegis)
+- All sites use the SAME typesCompatible function. No site-specific reimplementation.
+- Changes:
+  * Return type verification: Return statements checked against declared return type.
+  * Struct field verification: StructLit checks field value types against declared field types.
+  * Typed let verification: let x: T = expr checks inferType(expr) against T.
+  * Impl method bodies now type-checked (were skipped entirely before).
+  * Built implParamOrder table for method call argument checking.
+  * inferType resolves impl method return types via fnRet lookup under "StructName::methodName".
+  * Moved impl method fnRet population to setup phase (before body walking).
+- 18 audit tests in tests/phase8-audit.test.ts covering all 6 sites + round-5 PoCs + false positives.
+- All 148 tests pass. 0 failures.
+- 52/52 PoCs from all 5 reviews verified individually.
+- Pushed to https://github.com/Abd123454/aegis
+
+Stage Summary:
+- This is the SIXTH attempt. Unlike prior rounds, Phase 8 audited ALL annotation sites.
+- A sixth independent review should look for soundness gaps in typesCompatible itself,
+  not for a missing annotation site.
