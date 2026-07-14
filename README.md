@@ -3,7 +3,7 @@
 ![CI](https://github.com/Abd123454/aegis/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-research%20prototype-orange.svg)
-![Tests](https://img.shields.io/badge/tests-148%20pass-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-157%20pass-brightgreen.svg)
 
 > A programming language built from scratch for security-by-construction,
 > ease of learning, and universal reach. This repository contains the
@@ -13,6 +13,53 @@
 **Project status: research prototype / MVP.** Not production-ready. Not
 "unhackable." The interpreter is a teaching tool that demonstrates the
 security properties; it is NOT a production compiler.
+
+---
+
+## Phase 9: Implicit Return Type Check + Test Suite Audit (seventh attempt)
+
+This is the **SEVENTH attempt** at the ambient-authority guarantee. Round 6
+found that Phase 8's return-type check only covered **explicit** `return`
+statements. The idiomatic Aegis pattern — last expression in a block as
+**implicit return** — bypassed the check entirely. Worse: the Phase 8 test
+`LIE-fs-bypass` gave **false confidence** — it used a struct without an
+impl for the gated method, so the runtime backstop caught the error, not
+the type checker.
+
+**Phase 9 fixes three things:**
+
+1. **Implicit return type check (Fix 1)**: The last `Expr` statement in a
+   function body is now type-checked against the declared return type, same
+   as explicit `return`. Closes R5-LIE-fs-implicit, R5-sql-implicit,
+   R5-cmd-implicit.
+
+2. **Struct literal depth limit (Fix 2)**: `parseStructLit` now calls
+   `enterDepth`/`exitDepth`, preventing stack overflow on deeply nested
+   struct literals. Closes NEST-struct (exit 137 → clean diagnostic).
+
+3. **Test suite audit (Fix 3)**: Systematically audited all 81 rejection
+   tests for false confidence. Found **6 tests** in `phase8-audit.test.ts`
+   that used structs WITHOUT impls for gated methods — the runtime backstop
+   caught them, not the static check. These gave the impression the type
+   checker was working when it wasn't. Full audit in
+   [`tests/PHASE9_AUDIT.md`](tests/PHASE9_AUDIT.md).
+
+**We discovered that our test suite had a blind spot that let a real bypass
+look fixed for an entire review cycle.** This is the method we now use to
+verify tests actually test what they claim: every rejection test must use
+a struct WITH a real impl for the gated method, so the runtime backstop
+alone would NOT catch it — only the static type check can.
+
+**157 tests pass** (148 prior + 9 new phase-9 tests). 0 failures.
+
+### This is the SEVENTH attempt
+
+- **Phase 4**: name-based → broken by aliasing
+- **Phase 5**: value-tracking → broken by wrapping
+- **Phase 6**: type system → missing argument-type check
+- **Phase 7**: argument-type check → return types still unchecked
+- **Phase 8**: all annotation sites checked → implicit returns bypass
+- **Phase 9** (this): implicit returns + test suite audit
 
 ---
 

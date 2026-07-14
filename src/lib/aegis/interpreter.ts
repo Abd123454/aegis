@@ -549,6 +549,19 @@ class Parser {
     return args;
   }
   parseStructLit(head: { n: "Ident"; name: string; line: number; col: number }): Expr {
+    // PHASE 9 Fix 2: Add depth tracking to prevent stack overflow on deeply
+    // nested struct literals (e.g. N { n: N { n: N { ... } } }).
+    if (!this.enterDepth("struct literal")) {
+      // Depth exceeded — consume the block to avoid infinite loop.
+      this.eat("{");
+      let braceDepth = 1;
+      while (braceDepth > 0 && !this.check("eof")) {
+        if (this.check("{")) braceDepth++;
+        else if (this.check("}")) { braceDepth--; this.next(); continue; }
+        this.next();
+      }
+      return { n: "StructLit", name: head.name, fields: [], line: head.line, col: head.col };
+    }
     const line = head.line, col = head.col;
     this.expect("{", "'{'");
     const fields: { name: string; val: Expr; punned: boolean }[] = [];
@@ -565,6 +578,7 @@ class Parser {
       this.eat(",");
     }
     this.expect("}", "'}'");
+    this.exitDepth();
     return { n: "StructLit", name: head.name, fields, line, col };
   }
   parseLambda(): Expr {
@@ -1065,12 +1079,18 @@ function typeCheck(items: Item[]): Diag[] {
 
   // --- Walking functions (with depth tracking — P1 fix) ---
   // PHASE 8: added `declaredRet` and `fnName` params for return-type verification
+  // PHASE 9: added `isImplicitReturn` param — the last statement in a function
+  // body block is the implicit return value. Its type must be checked against
+  // declaredRet, just like explicit Return statements.
   function walkStmts(stmts: Stmt[], ctx: Map<string, Type>, ownScope: Set<string>, depth: number, declaredRet: Type | null, fnName: string) {
     if (depth > 256) return;
-    for (const s of stmts) walkStmt(s, ctx, ownScope, depth, declaredRet, fnName);
+    for (let i = 0; i < stmts.length; i++) {
+      const isLast = i === stmts.length - 1;
+      walkStmt(stmts[i], ctx, ownScope, depth, declaredRet, fnName, isLast && declaredRet !== null);
+    }
   }
 
-  function walkStmt(s: Stmt, ctx: Map<string, Type>, ownScope: Set<string>, depth: number, declaredRet: Type | null, fnName: string) {
+  function walkStmt(s: Stmt, ctx: Map<string, Type>, ownScope: Set<string>, depth: number, declaredRet: Type | null, fnName: string, isImplicitReturn: boolean = false) {
     if (depth > 256) return;
     if (s.n === "Let") {
       // P2 fix: null-check before inferType
@@ -1098,6 +1118,15 @@ function typeCheck(items: Item[]): Diag[] {
       }
     } else if (s.n === "Expr") {
       if (s.expr) walkExpr(s.expr, ctx, ownScope, depth, declaredRet, fnName);
+      // PHASE 9 Fix 1: Check implicit return type.
+      // The last Expr statement in a function body is the implicit return.
+      // Its type must be checked against declaredRet, same as explicit Return.
+      if (isImplicitReturn && s.expr && declaredRet) {
+        const retTy = inferType(s.expr, ctx, sft, fnRet, { d: 0, max: 256 });
+        if (!typesCompatible(retTy, declaredRet)) {
+          diags.push({ kind: "error", phase: "check", line: s.line, col: 0, msg: `Type error in implicit return from '${fnName}': declared return type is ${formatType(declaredRet)} but the expression has type ${formatType(retTy)}.` });
+        }
+      }
     } else if (s.n === "Return") {
       if (s.expr) {
         walkExpr(s.expr, ctx, ownScope, depth, declaredRet, fnName);

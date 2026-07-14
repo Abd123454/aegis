@@ -43,6 +43,27 @@ backward-compatibility promise applies.
 
 ## [Unreleased]
 
+### Phase 9 — Implicit return type check + test suite audit (seventh attempt)
+
+Round 6 found that Phase 8's return-type check only covered explicit `return`
+statements. Implicit returns (last expression in a block) bypassed it entirely.
+Worse: the Phase 8 test LIE-fs-bypass gave false confidence — it used a struct
+without an impl, so the runtime backstop caught the error, not the type checker.
+
+- **Fixed (Fix 1)**: Implicit return type check — last Expr in function body
+  checked against declared return type via typesCompatible.
+- **Fixed (Fix 2)**: parseStructLit now has depth tracking (enterDepth/exitDepth).
+  Deeply nested struct literals produce clean diagnostic instead of crash.
+- **Audited (Fix 3)**: All 81 rejection tests audited for false confidence.
+  Found 6 false-confidence tests in phase8-audit.test.ts (used structs without
+  impls → runtime backstop caught them, not static check). Full audit in
+  tests/PHASE9_AUDIT.md.
+- **Added**: 9 new tests in tests/phase9-implicit-return.test.ts using structs
+  WITH real impls for gated methods (R5-LIE-fs/sql/cmd-implicit, NEST-struct,
+  legitimate implicit returns, explicit return regression).
+
+All 157 tests pass. 0 failures.
+
 ### Phase 8 — Comprehensive type annotation audit (sixth attempt)
 
 Round 5 found function return types were declared but never checked — the
