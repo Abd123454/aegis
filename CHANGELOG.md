@@ -43,6 +43,27 @@ backward-compatibility promise applies.
 
 ## [Unreleased]
 
+### Phase 4 — Adversarial review vulnerability fixes
+
+An independent adversarial review found 27/39 exploit attempts succeeded
+against the 8 security claims. All 12 fix-list items addressed:
+
+- **Fixed**: `env` removed from globals (was bypassable via 3 independent paths).
+- **Fixed**: String interpolation now analyzed by the capability checker.
+- **Fixed**: Forged `Module`/`Env`/`TaskHandle` structs rejected at parse time.
+- **Fixed**: `db.query` template must be a plain string literal (no concat/interp).
+- **Fixed**: `shell.run` array elements must all be plain string literals.
+- **Fixed**: Integer overflow checked on `-`, `*`, unary `-`, and oversized literals.
+- **Fixed**: `Cap<fs>` type parsing — generic args normalized.
+- **Fixed**: `static\nmut` tokenizer bypass — newlines now skipped.
+- **Fixed**: Parser depth limit (256) — deep nesting produces clean error.
+- **Partially mitigated**: `spawn` is synchronous in the reference interpreter;
+  data-race guarantee is compile-time design intent only.
+- **Fixed**: Closure mutation of captured variables rejected at analysis.
+- **Added**: 24 adversarial regression tests (`tests/adversarial.test.ts`).
+
+All 74 tests pass (50 original + 24 adversarial).
+
 ### Phase 3 — Independent verifiability + GitHub readiness
 
 - **Added**: Formal automated test suite in `/tests/` (50 tests across 4

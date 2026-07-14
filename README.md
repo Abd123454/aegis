@@ -3,6 +3,7 @@
 ![CI](https://github.com/Abd123454/aegis/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-research%20prototype-orange.svg)
+![Tests](https://img.shields.io/badge/tests-74%20pass-brightgreen.svg)
 
 > A programming language built from scratch for security-by-construction,
 > ease of learning, and universal reach. This repository contains the
@@ -15,26 +16,54 @@ security properties; it is NOT a production compiler.
 
 ---
 
-## What Aegis is
+## Phase 4: Adversarial review and vulnerability fixes
 
-Aegis is a new programming language whose defining mission is to eliminate
-entire classes of security vulnerabilities **by construction** — by making
-the vulnerable pattern impossible to *express*, not just discouraged.
+An independent adversarial review cloned this repository, read the source
+directly, and ran 39 novel exploit attempts against the 8 security claims.
+**27 succeeded.** 4 of 8 claims had runnable counterexamples; 1 more was
+only accidentally enforced. The central claim — ambient authority
+prevention — was broken via 3 independent bypasses.
 
-The reference interpreter in this repository (`src/lib/aegis/interpreter.ts`)
-implements a meaningful subset of the language and enforces the following
-security properties. Each is verified by an automated test in `/tests`:
+This phase fixes all 12 items from the review's fix list. The status of
+each fix, verified against the EXACT proof-of-concept code from the review:
 
-| Vulnerability class | Mechanism | Test file |
+| # | Fix | Status |
 |---|---|---|
-| Buffer overflow | Array indexing returns `Option<T>`; OOB → `None` | `tests/security.test.ts` |
-| Use-after-free / double-free | No `malloc`/`free`; ownership-based memory | `tests/security.test.ts` |
-| Null dereference | No `null` literal; use `Option<T>` | `tests/security.test.ts` |
-| SQL injection | `db.query(template, params)` only — single-string form rejected | `tests/security.test.ts` |
-| Command injection | `shell.run([args])` only — string form rejected | `tests/security.test.ts` |
-| Data race | `static mut` forbidden; `spawn(move, ...)` required | `tests/security.test.ts` |
-| Ambient authority | No `fs`/`net`/`shell` globals; reachable only via `env: Cap` | `tests/security.test.ts` |
-| Integer overflow | Checked arithmetic; overflow → `Err` | `tests/security.test.ts` |
+| 1 | Remove `env` from globals | **Fixed and re-verified** — PoCs A1, A3, A4 rejected |
+| 2 | Walk `StrLit` in analyzer | **Fixed and re-verified** — PoCs I1, I2, S2 rejected |
+| 3 | Reject forged `Module` structs | **Fixed and re-verified** — PoCs F1, F2, F3 rejected |
+| 4 | Validate `db.query` template shape | **Fixed and re-verified** — PoCs S1, S2 rejected |
+| 5 | Validate `shell.run` array elements | **Fixed and re-verified** — PoC S3 rejected |
+| 6 | Check overflow on ALL operators | **Fixed and re-verified** — PoCs O1, O3, O5 rejected |
+| 7 | Fix `Cap<...>` type parsing | **Fixed and re-verified** — `Cap<fs>` now recognized |
+| 8 | Fix `static\nmut` tokenizer bypass | **Fixed and re-verified** — PoC D1 rejected |
+| 9 | Parser recursion depth limit | **Fixed and re-verified** — PoC L12 produces clean error |
+| 10 | Make `spawn` concurrent or relabel | **Partially mitigated** — `spawn` is still synchronous in the reference interpreter; the data-race guarantee is a compile-time design intent (`static mut` rejected, `move` required) not a runtime-enforced property. The README claim is updated below. |
+| 11 | Fix closure mutation | **Fixed and re-verified** — PoCs C1, C2 rejected at analysis |
+| 12 | Regression tests for every bypass | **Done** — 24 adversarial tests in `tests/adversarial.test.ts` |
+
+**All 74 tests pass** (50 original + 24 adversarial). Every PoC from the
+review is now rejected.
+
+### What this means for the threat table
+
+The threat table below is updated to reflect what is now actually true.
+Claims that were broken and are now fixed are marked **FIXED**. Claims
+that are only partially enforced are marked **PARTIALLY MITIGATED**.
+
+| Vulnerability class | Mechanism | Status |
+|---|---|---|
+| Buffer overflow | Array indexing returns `Option<T>`; OOB → `None` | Enforced |
+| Use-after-free / double-free | No `malloc`/`free`; ownership-based memory | Enforced |
+| Null dereference | No `null` literal; use `Option<T>` | Enforced |
+| SQL injection | `db.query(template, params)` — template must be plain StrLit | **FIXED** (was bypassable via concatenation/interpolation) |
+| Command injection | `shell.run([literal_args])` — all elements must be StrLit | **FIXED** (was bypassable via variables in argv) |
+| Data race | `static mut` forbidden (incl. newlines); `spawn(move, ...)` required | **PARTIALLY MITIGATED** — compile-time design intent only; reference interpreter runs `spawn` synchronously |
+| Ambient authority | `env` not a global; reachable only via `Cap` parameter; StrLit interpolation analyzed; forged `Module` rejected | **FIXED** (was broken via 3 bypasses) |
+| Integer overflow | Checked on `+`, `-`, `*`, unary `-`; oversized literals rejected | **FIXED** (was only checked on `+` upper bound) |
+| Forged capability modules | `Module`/`Env`/`TaskHandle` names reserved; cannot be constructed | **FIXED** (was forgeable) |
+| Closure mutation | Captured variables cannot be mutated; rejected at analysis | **FIXED** (was silently no-op) |
+| Deep nesting DoS | Parser depth limit (256); clean error instead of RangeError | **FIXED** (was uncaught stack overflow) |
 
 ### What Aegis does NOT eliminate (honest limits)
 
@@ -43,22 +72,29 @@ security properties. Each is verified by an automated test in `/tests`:
 - **Hardware side-channels** — Spectre, Rowhammer attack the hardware, not the memory model.
 - **Dependency backdoors** — we mitigate via signed packages + reproducible builds, but a malicious dependency can still be signed.
 - **Flaws in the formal verification itself** — a proof is only as correct as its specification.
+- **Runtime data races** — the reference interpreter runs `spawn` synchronously, so the data-race guarantee is a compile-time design intent only.
 
 ---
 
 ## What has NOT been independently verified
 
-Every claim above is currently verified **only by the test suite in this
-repository**, which was authored by a single agent. Specifically:
+An independent adversarial review was performed in Phase 4 and found 27/39
+exploit attempts succeeded. The fixes above were written by the **same agent**
+that wrote the interpreter and the original tests. Specifically:
 
-- ❌ **No third-party security audit** has been performed.
+- ✅ **One independent adversarial review** was performed (Phase 4). It found
+  27 exploits that succeeded. All 12 fix-list items have been addressed.
+- ❌ **A SECOND independent review has NOT been performed.** The Phase 4 fixes
+  were written by the same agent whose code was just broken. A second review
+  is needed before any of these claims can be trusted again.
 - ❌ **No formal proof** of the security properties exists (design intent only).
-- ❌ **The test suite is single-agent-authored** — the same agent wrote the
-  interpreter and the tests. This is a real bias, not dishonesty.
-- ✅ **The only independent check** is [CI](https://github.com/Abd123454/aegis/actions):
-  GitHub Actions runs the full test suite on every push and pull request.
-  If CI passes, the tests pass on a clean machine — but the tests themselves
-  are still self-authored.
+- ❌ **The test suite is still single-agent-authored** — the same agent wrote
+  the interpreter, the original tests, AND the adversarial regression tests.
+  The adversarial tests use the exact PoC shapes from the review, but the
+  review itself was also AI-authored, so this is not fully independent.
+- ✅ **[CI](https://github.com/Abd123454/aegis/actions)** runs the full test
+  suite (74 tests) on every push. If CI passes, the tests pass on a clean
+  machine — but the tests themselves are self-authored.
 
 If you find a way to break any security guarantee, see [SECURITY.md](SECURITY.md).
 
@@ -68,7 +104,7 @@ If you find a way to break any security guarantee, see [SECURITY.md](SECURITY.md
 
 ```bash
 bun install      # install dependencies
-bun test         # run the full test suite (50 tests across 4 files)
+bun test         # run the full test suite (74 tests across 5 files)
 bun run lint     # check code quality
 ```
 
