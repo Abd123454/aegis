@@ -3,7 +3,7 @@
 ![CI](https://github.com/Abd123454/aegis/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-research%20prototype-orange.svg)
-![Tests](https://img.shields.io/badge/tests-74%20pass-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-89%20pass-brightgreen.svg)
 
 > A programming language built from scratch for security-by-construction,
 > ease of learning, and universal reach. This repository contains the
@@ -13,6 +13,50 @@
 **Project status: research prototype / MVP.** Not production-ready. Not
 "unhackable." The interpreter is a teaching tool that demonstrates the
 security properties; it is NOT a production compiler.
+
+---
+
+## Phase 5: Capability model redesign (second fix attempt)
+
+A SECOND independent adversarial review found that the Phase 4 fix was
+**name-based** — it matched the literal identifiers `env`/`cap` but any
+alias (`e`, `alias`, `myenv`) defeated the ambient-authority gate, the
+SQL-injection check, AND the command-injection check simultaneously.
+
+Phase 5 replaces name-matching with **capability-value tracking**:
+the analyzer now tracks which variables hold capability-tagged values
+through an interprocedural fixpoint, and the gate checks whether the
+receiver resolves to a cap-tagged value — not whether its name is `env`.
+
+A **runtime backstop** independently verifies the capability marker on
+Module values, so even an analyzer miss fails closed.
+
+### Phase 5 fix status
+
+| # | Fix | Status |
+|---|---|---|
+| 1 | Track capability VALUES, not names | **Fixed** — interprocedural fixpoint propagates cap-tag through aliasing, field access, call sites, and closure captures |
+| 2 | Runtime backstop on Module methods | **Fixed** — each Module's `__cap` carries `moduleName:sessionSecret`; forged or mistagged modules rejected at runtime |
+| 3 | Integer overflow on `/` and `%` | **Fixed** — `INT_MIN / -1` returns `Err` |
+| 4 | Depth limit on ALL recursion | **Fixed** — `parseBlock` and `evalExpr` now have depth tracking (not just `parseExpr`) |
+| 5 | Closure `ownScope` regression | **Fixed** — closure params added to `ownScope`; `|x| { x = x + 1; x }` now works |
+| 6 | Aliased adversarial tests | **Done** — 15 aliased tests covering AMBIENT-A/B/C/D/E/F, SQL-A/B/C, CMD-A/B, INT-A/B, CLOS-A/B, NEST-A/B/C |
+
+**89 tests pass** (17 security + 17 brevity + 7 domain + 9 regression +
+24 phase-4 adversarial + 15 phase-5 aliased). 0 failures.
+
+### This is the SECOND fix attempt for ambient authority
+
+- **Phase 4** (first attempt): name-based matching — broken by aliasing.
+- **Phase 5** (this attempt): value-based tracking + runtime backstop.
+- **If a third independent review finds this incomplete**, the capability
+  model needs a fundamental type-system-level redesign (e.g. a real
+  capability type with linear/affine properties), not a third patch.
+
+A third independent review (fresh context, no memory of rounds 1-2)
+should be commissioned, focused specifically on whether the
+capability-value tracking holds under aliasing, indirection, and the
+runtime backstop.
 
 ---
 
@@ -56,14 +100,14 @@ that are only partially enforced are marked **PARTIALLY MITIGATED**.
 | Buffer overflow | Array indexing returns `Option<T>`; OOB → `None` | Enforced |
 | Use-after-free / double-free | No `malloc`/`free`; ownership-based memory | Enforced |
 | Null dereference | No `null` literal; use `Option<T>` | Enforced |
-| SQL injection | `db.query(template, params)` — template must be plain StrLit | **FIXED** (was bypassable via concatenation/interpolation) |
-| Command injection | `shell.run([literal_args])` — all elements must be StrLit | **FIXED** (was bypassable via variables in argv) |
+| SQL injection | `db.query(template, params)` — template must be plain StrLit; checked even through aliases | **FIXED (P4) + RE-VERIFIED UNDER ALIASING (P5)** |
+| Command injection | `shell.run([literal_args])` — all elements must be StrLit; checked even through aliases | **FIXED (P4) + RE-VERIFIED UNDER ALIASING (P5)** |
 | Data race | `static mut` forbidden (incl. newlines); `spawn(move, ...)` required | **PARTIALLY MITIGATED** — compile-time design intent only; reference interpreter runs `spawn` synchronously |
-| Ambient authority | `env` not a global; reachable only via `Cap` parameter; StrLit interpolation analyzed; forged `Module` rejected | **FIXED** (was broken via 3 bypasses) |
-| Integer overflow | Checked on `+`, `-`, `*`, unary `-`; oversized literals rejected | **FIXED** (was only checked on `+` upper bound) |
-| Forged capability modules | `Module`/`Env`/`TaskHandle` names reserved; cannot be constructed | **FIXED** (was forgeable) |
-| Closure mutation | Captured variables cannot be mutated; rejected at analysis | **FIXED** (was silently no-op) |
-| Deep nesting DoS | Parser depth limit (256); clean error instead of RangeError | **FIXED** (was uncaught stack overflow) |
+| Ambient authority | Capability-value tracking (interprocedural fixpoint); `env` not a global; runtime backstop on Module methods | **FIXED (P4) + REDESIGNED (P5)** — second fix attempt; tracks values not names |
+| Integer overflow | Checked on `+`, `-`, `*`, `/`, `%`, unary `-`; oversized literals rejected | **FIXED (P4) + EXTENDED to `/` and `%` (P5)** |
+| Forged capability modules | `Module`/`Env`/`TaskHandle` names reserved; runtime backstop verifies `__cap` tag | **FIXED (P4) + RUNTIME BACKSTOP (P5)** |
+| Closure mutation | Captured variables cannot be mutated; rejected at analysis; closure params can be reassigned | **FIXED (P4) + REGRESSION FIXED (P5)** |
+| Deep nesting DoS | Parser depth limit (256) on all recursion; evaluator depth limit (512) | **FIXED (P4) + EXTENDED to all paths (P5)** |
 
 ### What Aegis does NOT eliminate (honest limits)
 
@@ -78,23 +122,30 @@ that are only partially enforced are marked **PARTIALLY MITIGATED**.
 
 ## What has NOT been independently verified
 
-An independent adversarial review was performed in Phase 4 and found 27/39
-exploit attempts succeeded. The fixes above were written by the **same agent**
-that wrote the interpreter and the original tests. Specifically:
+TWO independent adversarial reviews have been performed:
+- **Phase 4 review**: found 27/39 exploits succeeded (name-based bypasses).
+- **Phase 5 review**: found the Phase 4 fix was name-based and defeated by aliasing.
 
-- ✅ **One independent adversarial review** was performed (Phase 4). It found
-  27 exploits that succeeded. All 12 fix-list items have been addressed.
-- ❌ **A SECOND independent review has NOT been performed.** The Phase 4 fixes
-  were written by the same agent whose code was just broken. A second review
-  is needed before any of these claims can be trusted again.
+The Phase 5 fixes were written by the **same agent** that wrote the code
+being fixed. Specifically:
+
+- ✅ **Two independent adversarial reviews** have been performed (Phase 4 + Phase 5).
+- ❌ **A THIRD independent review has NOT been performed.** The Phase 5 fixes
+  were written by the same agent whose code was just broken twice. A third
+  review with fresh context (no memory of rounds 1-2) is needed, focused
+  specifically on whether the capability-value tracking holds under
+  aliasing, indirection, and the runtime backstop.
 - ❌ **No formal proof** of the security properties exists (design intent only).
 - ❌ **The test suite is still single-agent-authored** — the same agent wrote
-  the interpreter, the original tests, AND the adversarial regression tests.
-  The adversarial tests use the exact PoC shapes from the review, but the
-  review itself was also AI-authored, so this is not fully independent.
+  the interpreter, the original tests, the Phase 4 adversarial tests, AND the
+  Phase 5 aliased tests. The aliased tests use different variable names, but
+  the review that identified the aliasing attack was also AI-authored.
 - ✅ **[CI](https://github.com/Abd123454/aegis/actions)** runs the full test
-  suite (74 tests) on every push. If CI passes, the tests pass on a clean
+  suite (89 tests) on every push. If CI passes, the tests pass on a clean
   machine — but the tests themselves are self-authored.
+- ⚠️ **If a third review finds the capability-value tracking incomplete**, the
+  capability model needs a fundamental type-system-level redesign (e.g. a real
+  capability type with linear/affine properties), not a third patch.
 
 If you find a way to break any security guarantee, see [SECURITY.md](SECURITY.md).
 
@@ -104,7 +155,7 @@ If you find a way to break any security guarantee, see [SECURITY.md](SECURITY.md
 
 ```bash
 bun install      # install dependencies
-bun test         # run the full test suite (74 tests across 5 files)
+bun test         # run the full test suite (89 tests across 6 files)
 bun run lint     # check code quality
 ```
 
