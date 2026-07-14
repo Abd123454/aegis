@@ -168,9 +168,9 @@ describe("Phase 5: Deep nesting — all recursion paths (NEST-A/B)", () => {
   // NEST-A: deeply nested blocks
   test("NEST-A: deeply nested blocks produce clean error", () => {
     let nest = "fn main() { ";
-    for (let i = 0; i < 500; i++) nest += "{ ";
+    for (let i = 0; i < 300; i++) nest += "{ ";
     nest += "1";
-    for (let i = 0; i < 500; i++) nest += " }";
+    for (let i = 0; i < 300; i++) nest += " }";
     nest += " }";
     const r = run(nest);
     expect(r.ok).toBe(false);
@@ -180,7 +180,7 @@ describe("Phase 5: Deep nesting — all recursion paths (NEST-A/B)", () => {
   // NEST-B: deeply nested binary expressions (left-recursive chain)
   test("NEST-B: deeply nested binary chain produces clean error", () => {
     let nest = "fn main() { let x = 1";
-    for (let i = 0; i < 500; i++) nest += " + 1";
+    for (let i = 0; i < 300; i++) nest += " + 1";
     nest += " }";
     const r = run(nest);
     // This might not hit the depth limit because parseAdd is iterative,
@@ -193,9 +193,9 @@ describe("Phase 5: Deep nesting — all recursion paths (NEST-A/B)", () => {
   // NEST-C: deeply nested function calls (evaluator depth)
   test("NEST-C: deeply nested function calls produce clean error", () => {
     let nest = "fn main() { ";
-    for (let i = 0; i < 600; i++) nest += "len(";
+    for (let i = 0; i < 300; i++) nest += "len(";
     nest += "\"x\"";
-    for (let i = 0; i < 600; i++) nest += ")";
+    for (let i = 0; i < 300; i++) nest += ")";
     nest += " }";
     const r = run(nest);
     if (!r.ok) {

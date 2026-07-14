@@ -3,7 +3,7 @@
 ![CI](https://github.com/Abd123454/aegis/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-research%20prototype-orange.svg)
-![Tests](https://img.shields.io/badge/tests-89%20pass-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-96%20pass-brightgreen.svg)
 
 > A programming language built from scratch for security-by-construction,
 > ease of learning, and universal reach. This repository contains the
@@ -40,10 +40,10 @@ Module values, so even an analyzer miss fails closed.
 | 3 | Integer overflow on `/` and `%` | **Fixed** — `INT_MIN / -1` returns `Err` |
 | 4 | Depth limit on ALL recursion | **Fixed** — `parseBlock` and `evalExpr` now have depth tracking (not just `parseExpr`) |
 | 5 | Closure `ownScope` regression | **Fixed** — closure params added to `ownScope`; `|x| { x = x + 1; x }` now works |
-| 6 | Aliased adversarial tests | **Done** — 15 aliased tests covering AMBIENT-A/B/C/D/E/F, SQL-A/B/C, CMD-A/B, INT-A/B, CLOS-A/B, NEST-A/B/C |
+| 6 | Aliased adversarial tests | **Done** — 22 aliased tests covering AMBIENT-A/B/C/D/E/F, SQL-A/B/C, CMD-A/B, INT-A/B, CLOS-A/B, NEST-A/B/C, runtime backstop, interprocedural flow |
 
-**89 tests pass** (17 security + 17 brevity + 7 domain + 9 regression +
-24 phase-4 adversarial + 15 phase-5 aliased). 0 failures.
+**96 tests pass** (17 security + 17 brevity + 7 domain + 9 regression +
+24 phase-4 adversarial + 22 phase-5 aliased). 0 failures.
 
 ### This is the SECOND fix attempt for ambient authority
 

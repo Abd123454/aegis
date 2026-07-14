@@ -379,7 +379,18 @@ class Parser {
     return { n: "ForIn", var: v, iter: iter!, body, line };
   }
   parseBlock(): Stmt[] {
-    if (!this.enterDepth("block")) return [];
+    if (!this.enterDepth("block")) {
+      // Depth exceeded — consume the block to avoid infinite loop.
+      // The error diagnostic was already pushed by enterDepth.
+      this.eat("{");
+      let depth = 1;
+      while (depth > 0 && !this.check("eof")) {
+        if (this.check("{")) depth++;
+        else if (this.check("}")) { depth--; this.next(); continue; }
+        this.next();
+      }
+      return [];
+    }
     this.expect("{", "'{'");
     const body: Stmt[] = [];
     while (!this.check("}") && !this.check("eof")) {
@@ -513,7 +524,12 @@ class Parser {
   parseArgs(): Expr[] {
     this.expect("(", "'('");
     const args: Expr[] = [];
-    while (!this.check(")") && !this.check("eof")) { const a = this.parseExpr(); if (a) args.push(a); this.eat(","); }
+    while (!this.check(")") && !this.check("eof")) {
+      const a = this.parseExpr();
+      if (a) args.push(a);
+      else { this.next(); } // skip unparseable token to avoid infinite loop on depth limit
+      this.eat(",");
+    }
     this.expect(")", "')'");
     return args;
   }

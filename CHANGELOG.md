@@ -43,6 +43,39 @@ backward-compatibility promise applies.
 
 ## [Unreleased]
 
+### Phase 5 — Capability model redesign (second fix attempt)
+
+A second independent adversarial review found that the Phase 4 fix was
+name-based — aliasing the capability to any other variable name (`e`,
+`alias`, `myenv`) defeated the ambient-authority gate, SQL-injection
+check, AND command-injection check simultaneously.
+
+Phase 5 replaces name-matching with capability-value tracking:
+
+- **Fixed**: Capability-value tracking via interprocedural fixpoint. The
+  analyzer now tracks which variables hold cap-tagged values through
+  aliasing, field access, call sites, and closure captures — not which
+  variables are named `env`.
+- **Fixed**: Runtime backstop. Each Module's `__cap` carries
+  `moduleName:sessionSecret`; forged or mistagged modules are rejected
+  at runtime. Even an analyzer miss fails closed.
+- **Fixed**: Integer overflow on `/` and `%`. `INT_MIN / -1` returns `Err`.
+- **Fixed**: Depth limit on ALL recursion — `parseBlock`, `parseArgs`,
+  and `evalExpr` now have depth tracking. Fixed infinite-loop bug when
+  `enterDepth` failed without consuming tokens.
+- **Fixed**: Closure `ownScope` regression — closure params added to
+  `ownScope`; `|x| { x = x + 1; x }` now works.
+- **Added**: 22 aliased adversarial tests (`tests/phase5-aliased.test.ts`)
+  with PoCs from the second review: AMBIENT-A/B/C/D/E/F, SQL-A/B/C,
+  CMD-A/B, INT-A/B, CLOS-A/B, NEST-A/B/C, runtime backstop, interprocedural.
+
+All 96 tests pass (17 security + 17 brevity + 7 domain + 9 regression +
+24 phase-4 adversarial + 22 phase-5 aliased). 0 failures.
+
+NOTE: This is the SECOND fix attempt for the ambient-authority claim.
+If a third independent review finds this incomplete, the capability model
+needs a fundamental type-system-level redesign, not a third patch.
+
 ### Phase 4 — Adversarial review vulnerability fixes
 
 An independent adversarial review found 27/39 exploit attempts succeeded
