@@ -175,7 +175,7 @@ function tokenize(src: string): { toks: Tok[]; diags: Diag[] } {
     if (c === "*") { push("star", "*"); i++; col++; continue; }
     if (c === "#") { push("#", "#"); i++; col++; continue; }
     const two = src.slice(i, i + 2);
-    if (["=>","==","!=","<=",">=","->","&&","||","|>"].includes(two)) { push(two, two); i += 2; col += 2; continue; }
+    if (["=>","==","!=","<=",">=","->","&&","||","|>","::"].includes(two)) { push(two, two); i += 2; col += 2; continue; }
     if (c === "|") { push("|", "|"); i++; col++; continue; }
     if ("+-/%(){}[],:;=<>?.".includes(c)) { push(c, c); i++; col++; continue; }
     diags.push({ kind: "error", phase: "parse", line, col, msg: `Unexpected character '${c}'.` });
@@ -275,8 +275,10 @@ class Parser {
     if (this.eat("(")) {
       while (!this.check(")") && !this.check("eof")) {
         const pname = this.peek().t === "ident" ? this.next().v : "_";
-        this.expect(":", "':' in parameter");
-        const ty = this.parseType();
+        // Allow `self` (and any param) to omit the type annotation —
+        // `self, other: Point` is valid. Type defaults to "Any".
+        let ty = "Any";
+        if (this.eat(":")) ty = this.parseType();
         params.push({ name: pname, ty });
         if (ty === "Cap") hasCap = true;
         this.eat(",");
@@ -442,6 +444,9 @@ class Parser {
   parsePostfix(): Expr | null {
     let e = this.parsePrimary();
     if (!e) return null;
+    // Ensure noStructLit is only true inside if/match conditions, not in general
+    // expression context. parsePrimary sets it for if/match and parseIf/parseMatch
+    // reset it before parsing the block.
     while (true) {
       if (this.check("?")) { const t = this.peek(); this.next(); e = { n: "Try", e, line: t.line, col: t.col }; }
       else if (this.check(".")) {
@@ -449,7 +454,24 @@ class Parser {
         const name = this.peek().t === "ident" ? this.next().v : "?";
         if (this.check("(")) { const args = this.parseArgs(); e = { n: "Method", recv: e, name, args, line: 0, col: 0 }; }
         else { e = { n: "Field", recv: e, name }; }
-      } else if (this.check("(")) { const args = this.parseArgs(); e = { n: "Call", callee: e, args, line: 0, col: 0 }; }
+      } else if (this.check("::")) {
+        // Associated function call: Type::method(args)
+        this.next();
+        const name = this.peek().t === "ident" ? this.next().v : "?";
+        const args = this.check("(") ? this.parseArgs() : [];
+        // Desugar to a call on the type name (impl lookup by struct name)
+        e = { n: "Call", callee: { n: "Ident", name: "__assoc__", line: 0, col: 0 } as any, args: [e, ...args], line: 0, col: 0 };
+        (e as any).__assocName = name;
+      } else if (this.check("(")) {
+        // Don't treat `literal(...)` as a call — a literal followed by `(` on
+        // the next line is almost certainly a missing `;`, not a function call.
+        // Only idents and call/method results can be called.
+        if (e.n === "IntLit" || e.n === "FloatLit" || e.n === "StrLit" || e.n === "BoolLit" || e.n === "None") {
+          break;
+        }
+        const args = this.parseArgs();
+        e = { n: "Call", callee: e, args, line: 0, col: 0 };
+      }
       else if (this.check("[")) { const t = this.peek(); this.next(); const idx = this.parseExpr(); this.expect("]", "']'"); e = { n: "Index", arr: e, idx: idx!, line: t.line, col: t.col }; }
       else if (!this.noStructLit && e.n === "Ident" && /^[A-Z]/.test(e.name) && this.check("{")) {
         // struct literal: Ident { fields }
@@ -487,14 +509,18 @@ class Parser {
   }
   parseLambda(): Expr {
     const t = this.peek();
-    this.eat("|");
     const params: string[] = [];
-    while (!this.check("|") && !this.check("eof")) {
-      if (this.peek().t === "ident") { params.push(this.next().v); }
-      else { this.next(); } // skip unexpected, avoid infinite loop
-      this.eat(",");
+    // `||` (OR token) = empty params; `|...|` = one or more params.
+    if (this.eat("||")) {
+      // empty param list
+    } else if (this.eat("|")) {
+      while (!this.check("|") && !this.check("eof")) {
+        if (this.peek().t === "ident") { params.push(this.next().v); }
+        else { this.next(); }
+        this.eat(",");
+      }
+      this.expect("|", "'|'");
     }
-    this.expect("|", "'|'");
     let body: Stmt[];
     if (this.check("{")) { body = this.parseBlock(); }
     else { const e = this.parseExpr(); body = e ? [{ n: "Expr", expr: e }] : []; }
@@ -531,7 +557,7 @@ class Parser {
     if (t.t === "Ok") { this.next(); const e = this.parsePostfix(); return e ? { n: "Ok", e } : null; }
     if (t.t === "Err") { this.next(); const e = this.parsePostfix(); return e ? { n: "Err", e } : null; }
     if (t.t === "ident" || t.t === "print") { this.next(); return { n: "Ident", name: t.v, line: t.line, col: t.col }; }
-    if (t.t === "|") return this.parseLambda();
+    if (t.t === "|" || t.t === "||") return this.parseLambda();
     if (t.t === "(") { this.next(); const e = this.parseExpr(); this.expect(")", "')'"); return e; }
     if (t.t === "[") {
       this.next(); const elems: Expr[] = [];
@@ -591,9 +617,12 @@ class Parser {
       this.diags.push({ kind: "error", phase: "check", line: modeTok.line, col: modeTok.col, msg: "`spawn` requires `move` as the first argument. Shared mutable state across tasks is forbidden — eliminates data races. Usage: spawn(move |cap| { ... })" });
     } else { this.next(); }
     const params: string[] = [];
+    // Accept `|...|` or `||` (empty params, tokenized as the OR operator).
     if (this.eat("|")) {
       while (!this.check("|") && !this.check("eof")) { params.push(this.peek().t === "ident" ? this.next().v : "_"); this.eat(","); }
       this.eat("|");
+    } else if (this.eat("||")) {
+      // empty param list `||`
     }
     const body = this.parseBlock();
     this.expect(")", "')'");
@@ -656,7 +685,7 @@ function analyze(items: Item[]): Diag[] {
       case "Try": walkExpr(e.e, hasCap, locals); break;
       case "Some": case "Ok": case "Err": walkExpr(e.e, hasCap, locals); break;
       case "StructLit": for (const f of e.fields) walkExpr(f.val, hasCap, locals); break;
-      case "Closure": walkStmts(e.body, hasCap, new Set(locals)); break;
+      case "Closure": walkStmts(e.body, false, new Set(locals)); break;
     }
   }
   for (const it of items) walkStmt(it, false, new Set());
@@ -727,11 +756,10 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
   const impls = new Map<string, Map<string, any>>();
   const capObj: Val = { k: "cap", label: "fs,net,shell,db,env" };
   const makeModule = (name: string): Val => ({ k: "struct", name: "Module", fields: { __cap: capObj, __mod: { k: "str", v: name } } });
+  // NOTE: fs/net/shell/db are NOT globals. They are reachable ONLY through `env`
+  // (the capability passed to main). This is what makes the capability model
+  // enforceable: a function without `env` in scope cannot name `fs` at all.
   globals.set("env", { k: "struct", name: "Env", fields: { fs: makeModule("fs"), net: makeModule("net"), shell: makeModule("shell"), db: makeModule("db"), __cap: capObj } });
-  globals.set("fs", makeModule("fs"));
-  globals.set("net", makeModule("net"));
-  globals.set("shell", makeModule("shell"));
-  globals.set("db", makeModule("db"));
   globals.set("print", { k: "fn", name: "print", params: [], body: [], closure: new Map(), caps: false });
   globals.set("sqrt", { k: "fn", name: "sqrt", params: ["x"], body: [], closure: new Map(), caps: false });
   globals.set("len", { k: "fn", name: "len", params: ["x"], body: [], closure: new Map(), caps: false });
@@ -759,7 +787,12 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
     const local: Env = new Map(fnVal.closure);
     for (let i = 0; i < fnVal.params.length; i++) local.set(fnVal.params[i], args[i]);
     try { return execBlock(fnVal.body, local); }
-    catch (sig) { if (sig instanceof ReturnSignal) return sig.val; throw sig; }
+    catch (sig) {
+      if (sig instanceof ReturnSignal) return sig.val;
+      // ? operator: function returns the Err/None value instead of throwing
+      if (sig instanceof TrySignal) return sig.val;
+      throw sig;
+    }
   };
 
   const evalExpr = (e: Expr, env: Env): Val => {
@@ -825,7 +858,14 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
       }
       case "Match": return evalMatch(e, env);
       case "Block": return execBlock(e.body, env);
-      case "Try": { const v = evalExpr(e.e, env); if (v.k === "err" || v.k === "none") throw new TrySignal(v); return v; }
+      case "Try": {
+        const v = evalExpr(e.e, env);
+        // `?` unwraps Ok(x) -> x and Some(x) -> x; propagates Err/None.
+        if (v.k === "err" || v.k === "none") throw new TrySignal(v);
+        if (v.k === "ok") return v.v;   // unwrap Ok
+        if (v.k === "some") return v.v; // unwrap Some
+        return v;
+      }
       case "Field": { const recv = evalExpr(e.recv, env); if (recv.k === "struct" && e.name in recv.fields) return recv.fields[e.name]; throw new EvalErr(`No field '${e.name}'.`, 0, 0); }
       case "Call": return evalCall(e, env);
       case "Method": return evalMethod(e, env);
@@ -950,6 +990,30 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
       const result = execBlock(clos.body, local);
       return { k: "struct", name: "TaskHandle", fields: { result, __done: { k: "bool", v: true } } };
     }
+    if (e.callee.n === "Ident" && e.callee.name === "__assoc__") {
+      // Associated function call: Type::method(args...)
+      const typeName = (e.args[0] as any)?.name;
+      const methodName = (e as any).__assocName;
+      if (typeName && impls.has(typeName)) {
+        const m = impls.get(typeName)!.get(methodName);
+        if (m) {
+          const local: Env = new Map(globals);
+          const callArgs = e.args.slice(1).map((a) => evalExpr(a, env));
+          let ai = 0;
+          for (const p of m.params) {
+            if (p.name === "self") continue;
+            local.set(p.name, callArgs[ai]); ai++;
+          }
+          try { return execBlock(m.body, local); }
+          catch (sig) {
+            if (sig instanceof ReturnSignal) return sig.val;
+            if (sig instanceof TrySignal) return sig.val; // ? propagates => function returns Err/None
+            throw sig;
+          }
+        }
+      }
+      throw new EvalErr(`No associated function '${methodName}' on '${typeName}'.`, e.line, e.col);
+    }
     if (e.callee.n === "Ident" && (e.callee.name === "len" || e.callee.name === "sqrt")) {
       const args = e.args.map((a) => evalExpr(a, env));
       return applyFn(globals.get(e.callee.name)!, args);
@@ -990,10 +1054,22 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
           local.set(p.name, evalExpr(e.args[ai], env)); ai++;
         }
         try { return execBlock(m.body, local); }
-        catch (sig) { if (sig instanceof ReturnSignal) return sig.val; throw sig; }
+        catch (sig) {
+          if (sig instanceof ReturnSignal) return sig.val;
+          if (sig instanceof TrySignal) return sig.val;
+          throw sig;
+        }
       }
     }
     if (recv.k === "struct" && recv.name === "TaskHandle" && e.name === "join") return { k: "ok", v: recv.fields.result };
+
+    // ----- Number methods -----
+    if (recv.k === "int" || recv.k === "float") {
+      if (e.name === "sqrt") return { k: "float", v: Math.sqrt(recv.v) };
+      if (e.name === "abs") return { k: recv.k, v: Math.abs(recv.v) };
+      if (e.name === "floor") return { k: "int", v: Math.floor(recv.v) };
+      if (e.name === "ceil") return { k: "int", v: Math.ceil(recv.v) };
+    }
 
     // ----- String methods -----
     if (recv.k === "str") {
