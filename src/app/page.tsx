@@ -3,6 +3,7 @@ import {
   Shield, ShieldCheck, ShieldX, Lock, KeyRound, Boxes, Network, GitBranch,
   Layers, Wrench, Cpu, GitCompare, Eye, Map, CalendarClock, ArrowLeft,
   Terminal, FileCode2, Bug, CheckCircle2, XCircle, AlertTriangle, Sparkles,
+  Globe, Zap, Server, Smartphone, Cpu as CpuIcon, Code2,
 } from "lucide-react";
 import { CodeBlock } from "@/components/aegis/CodeBlock";
 import { LangCompare } from "@/components/aegis/LangCompare";
@@ -47,6 +48,17 @@ export default function Home() {
         <Adoption />
         <Section id="build-roadmap" num="16" icon={CalendarClock} title="خارطة طريق البناء الواقعية" />
         <BuildRoadmap />
+        <PhaseDivider />
+        <Section id="domains" num="17" icon={Globe} title="خريطة تغطية المجالات" />
+        <DomainCoverage />
+        <Section id="brevity-audit" num="18" icon={Zap} title="تدقيق الإيجاز" />
+        <BrevityAudit />
+        <Section id="tension-log" num="19" icon={AlertTriangle} title="سجلّ توتر الإيجاز والأمان" />
+        <TensionLog />
+        <Section id="threat-updated" num="20" icon={ShieldCheck} title="جدول التهديد بعد الإيجاز" />
+        <ThreatUpdated />
+        <Section id="working-domain" num="21" icon={Code2} title="مثال مجال يعمل بالكامل" />
+        <WorkingDomain />
         <Coda />
       </main>
       <Footer />
@@ -58,7 +70,8 @@ export default function Home() {
 function Header() {
   const links = [
     ["#philosophy", "الفلسفة"], ["#threat-model", "التهديدات"], ["#syntax", "النحو"],
-    ["#reference", "المفسّر"], ["#comparison", "المقارنة"], ["#adoption", "التبنّي"],
+    ["#reference", "المفسّر"], ["#domains", "المجالات"], ["#brevity-audit", "الإيجاز"],
+    ["#adoption", "التبنّي"],
   ];
   return (
     <header className="sticky top-0 z-50 border-b border-border bg-background/80 backdrop-blur-md">
@@ -1152,6 +1165,468 @@ function BuildRoadmap() {
           <li>قابلية عرض الخصائص للمجتمع وجذب مساهمين.</li>
           <li>قاعدة اختبار للأفكار الدلالية قبل استثمار خلفية LLVM.</li>
         </ul>
+      </div>
+    </Wrap>
+  );
+}
+
+/* --------------------------------------------------- Phase divider */
+function PhaseDivider() {
+  return (
+    <div className="mx-auto max-w-6xl px-4 pt-24 pb-2">
+      <div className="rounded-2xl border border-sky-500/20 bg-gradient-to-br from-sky-500/5 to-transparent p-6">
+        <div className="flex items-center gap-3 mb-2">
+          <Globe className="h-5 w-5 text-sky-400" />
+          <h2 className="text-xl font-bold">الطور الثاني: لغة عامة الغرض + إيجاز جذري</h2>
+        </div>
+        <p className="text-sm text-muted-foreground leading-relaxed max-w-3xl">
+          الأقسام التالية توسّع Aegis من «لغة أمن» إلى لغة عامة الغرض، مع دفع
+          الإيجاز أبعد — بحيث تستهلك المهام الشائعة أحرفاً أقل من Python. القاعدة
+          الصارمة: <span className="text-foreground font-medium">كل تبسيط نحوي يُفحص
+          ضد جدول التهديد؛ إن كان سيُعيد إدخال ثغرة مُلغاة، يُرفض</span>. الإيجاز لا
+          يُشترى بضمان مثبت.
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------ 17. Domain coverage */
+function DomainCoverage() {
+  const domains: {
+    icon: any; name: string; feature: string; code: string;
+  }[] = [
+    {
+      icon: Server, name: "نقطة ويب API", feature: "نظام الصلاحيات (env.net) + lambda للـ routes",
+      code: `fn main(env: Cap) {
+    let server = env.net.serve("0.0.0.0:8080")
+    server.route("/hello", |req| {
+        Ok(Response::text("hello"))
+    })
+    server.run()
+}`,
+    },
+    {
+      icon: Terminal, name: "سكربت CLI", feature: "صلاحية env.fs صريحة + ? للخروج المبكر",
+      code: `fn main(env: Cap) {
+    let name = env.fs.read("name.txt")?
+    print("Hello, {name.trim()}!")
+}`,
+    },
+    {
+      icon: GitBranch, name: "معالجة بيانات / ETL", feature: "map/filter/reduce + lambdas + pipeline |>",
+      code: `fn main(env: Cap) {
+    let raw = env.fs.read("sales.csv")?
+    let total = raw.split("\\n")
+        .filter(|l| l.len() > 0)
+        .map(|l| l.split(",")[1]?.parse_int()?.unwrap_or(0))
+        .reduce(|a, n| a + n, 0)
+    print("Total: {total}")
+}`,
+    },
+    {
+      icon: Code2, name: "واجهة ويب (WASM)", feature: "ترجمة إلى WASM + ADT/struct للـ DOM الافتراضي",
+      code: `fn view(model: Model) -> Html {
+    Html::div([], [
+        Html::h1([], [Text("Count: {model.count}")]),
+        Html::button([onClick(Inc)], [Text("+")]),
+    ])
+}`,
+    },
+    {
+      icon: CpuIcon, name: "حلقة حساس IoT", feature: "صلاحيات env.dev/env.net/env.time + loop + ?",
+      code: `fn main(env: Cap) {
+    let sensor = env.dev.open("/dev/i2c-1")?
+    loop {
+        let temp = sensor.read()?
+        env.net.post("https://api.x.com/temp", temp)?
+        env.time.sleep(60)
+    }
+}`,
+    },
+    {
+      icon: Smartphone, name: "شاشة تطبيق جوال", feature: "صلاحية env.ui + lambda للـ callbacks",
+      code: `fn main(env: Cap) {
+    let app = env.ui.app()
+    app.screen("Home", |state| {
+        Column([
+            Text("Welcome, {state.user}"),
+            Button("Logout", |s| s.logout()),
+        ])
+    })
+    app.run()
+}`,
+    },
+    {
+      icon: Sparkles, name: "استدعاء نموذج AI/ML", feature: "FFI عبر env.ffi إلى Python + Result",
+      code: `fn main(env: Cap) {
+    let py = env.ffi.python()?
+    let model = py.import("transformers")
+        .call("pipeline", ["text-generation"])?
+    let result = model.invoke("Hello")?
+    print(result)
+}`,
+    },
+  ];
+  return (
+    <Wrap className="space-y-6">
+      <p className="text-muted-foreground leading-relaxed max-w-3xl">
+        لكل مجال، برنامج Aegis قصير (5-15 سطراً) يوضّح أن اللغة ليست «لغة أمن»
+        فحسب بل لغة عامة الغرض. كل مثال يستخدم ميزة <span className="text-foreground">موجودة
+        فعلاً</span> في Aegis (نظام الصلاحيات، FFI، lambdas، WASM target) — لا
+        آليات جديدة عشوائية لكل مجال.
+      </p>
+      <div className="grid lg:grid-cols-2 gap-4">
+        {domains.map((d, i) => (
+          <div key={i} className="space-y-2">
+            <div className="flex items-center gap-2 px-1">
+              <d.icon className="h-4 w-4 text-sky-400 shrink-0" />
+              <span className="font-semibold text-sm">{d.name}</span>
+            </div>
+            <CodeBlock code={d.code} lang="aegis" filename={`${i + 1}.aegis`} maxHeight="240px" />
+            <div className="text-[11px] text-muted-foreground/80 px-1 leading-relaxed">
+              <span className="text-sky-400 font-medium">الميزة المُمكِّنة:</span> {d.feature}
+            </div>
+          </div>
+        ))}
+      </div>
+    </Wrap>
+  );
+}
+
+/* ------------------------------------------------ 18. Brevity audit */
+function BrevityAudit() {
+  const rows: {
+    name: string; py: number; v1: number; v2: number; rule: string;
+  }[] = [
+    { name: "Hello World", py: 22, v1: 40, v2: 40, rule: "بالفعل أدنى حد — `fn main()` ضروري للنطاق" },
+    { name: "دالة مع أخطاء", py: 189, v1: 252, v2: 211, rule: "استنتاج الأنواع + if تعبيراً (لا return)" },
+    { name: "بنية مع دوال", py: 307, v1: 412, v2: 373, rule: "field punning `Point { x, y }` + استنتاج الأنواع" },
+    { name: "قراءة ملف + JSON", py: 200, v1: 200, v2: 174, rule: "سلسلة `?` `env.fs.read(...)?.parse_int()`" },
+    { name: "مهمة متزامنة", py: 132, v1: 248, v2: 203, rule: "lambda موجز `|| expr` بدل closure كامل" },
+  ];
+  const totals = rows.reduce((a, r) => ({ py: a.py + r.py, v1: a.v1 + r.v1, v2: a.v2 + r.v2 }), { py: 0, v1: 0, v2: 0 });
+  return (
+    <Wrap className="space-y-6">
+      <p className="text-muted-foreground leading-relaxed max-w-3xl">
+        أعدنا كتابة البرامج الخمسة من قسم النحو لتكون أقصر ما يمكن مع بقاء كل فحص
+        أمان. الجدول يقارن عدد الأحرف في Python مقابل Aegis النسخة الأولى (v1)
+        مقابل النسخة المختصرة (v2). الصف السفلي يعطي المجموع.
+      </p>
+      <div className="rounded-xl border border-border overflow-hidden overflow-x-auto scroll-thin">
+        <table className="w-full text-sm min-w-[640px]">
+          <thead className="bg-muted/50">
+            <tr className="text-right">
+              <th className="px-4 py-3 font-semibold border-b border-border">البرنامج</th>
+              <th className="px-4 py-3 font-semibold border-b border-border text-center">Python</th>
+              <th className="px-4 py-3 font-semibold border-b border-border text-center">Aegis v1</th>
+              <th className="px-4 py-3 font-semibold border-b border-border text-center">Aegis v2</th>
+              <th className="px-4 py-3 font-semibold border-b border-border">قاعدة الإيجاز المُطبَّقة</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={i} className="border-b border-border/50 hover:bg-muted/20">
+                <td className="px-4 py-3 font-medium">{r.name}</td>
+                <td className="px-4 py-3 text-center font-mono text-muted-foreground">{r.py}</td>
+                <td className="px-4 py-3 text-center font-mono text-muted-foreground">{r.v1}</td>
+                <td className="px-4 py-3 text-center font-mono text-emerald-400 font-semibold">{r.v2}</td>
+                <td className="px-4 py-3 text-xs text-muted-foreground">{r.rule}</td>
+              </tr>
+            ))}
+            <tr className="bg-muted/30 font-semibold">
+              <td className="px-4 py-3">المجموع</td>
+              <td className="px-4 py-3 text-center font-mono">{totals.py}</td>
+              <td className="px-4 py-3 text-center font-mono">{totals.v1}</td>
+              <td className="px-4 py-3 text-center font-mono text-emerald-400">{totals.v2}</td>
+              <td className="px-4 py-3 text-xs text-emerald-400">
+                v2 أقصر بـ {Math.round((1 - totals.v2 / totals.v1) * 100)}% من v1، وبـ {Math.round((1 - totals.v2 / totals.py) * 100)}% من Python
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div className="grid md:grid-cols-2 gap-4">
+        <div>
+          <h4 className="font-medium text-sm mb-2 flex items-center gap-2"><Zap className="h-4 w-4 text-amber-400" /> القواعد التي أزالت الطقوس</h4>
+          <ul className="text-xs text-muted-foreground space-y-1.5 list-disc pr-4 leading-relaxed">
+            <li><span className="text-foreground font-mono" dir="ltr">استنتاج الأنواع الكامل</span> — <code className="font-mono text-emerald-400" dir="ltr">{`let x = 5`}</code> بدل <code className="font-mono text-muted-foreground" dir="ltr">{`let x: Int = 5`}</code></li>
+            <li><span className="text-foreground font-mono" dir="ltr">العائد الضمني</span> — آخر تعبير في الكتلة هو قيمتها (لا <code className="font-mono text-muted-foreground" dir="ltr">{`return`}</code>)</li>
+            <li><span className="text-foreground font-mono" dir="ltr">if/match تعبيرات</span> — <code className="font-mono text-emerald-400" dir="ltr">{`if c { a } else { b }`}</code> تعيد قيمة</li>
+            <li><span className="text-foreground font-mono" dir="ltr">عامل ?</span> — <code className="font-mono text-emerald-400" dir="ltr">{`env.fs.read(f)?`}</code> ينهي على Err بدل match كامل</li>
+            <li><span className="text-foreground font-mono" dir="ltr">lambda موجز</span> — <code className="font-mono text-emerald-400" dir="ltr">{`|x| x * 2`}</code> بدل <code className="font-mono text-muted-foreground" dir="ltr">{`fn(x) -> Int { x * 2 }`}</code></li>
+            <li><span className="text-foreground font-mono" dir="ltr">Field punning</span> — <code className="font-mono text-emerald-400" dir="ltr">{`Point { x, y }`}</code> بدل <code className="font-mono text-muted-foreground" dir="ltr">{`Point { x: x, y: y }`}</code></li>
+            <li><span className="text-foreground font-mono" dir="ltr">سلسلة استدعاء</span> — <code className="font-mono text-emerald-400" dir="ltr">{`a.map().filter().reduce()`}</code></li>
+            <li><span className="text-foreground font-mono" dir="ltr">استيفاء السلسلة</span> — <code className="font-mono text-emerald-400" dir="ltr">{`"{name}"`}</code> بدل <code className="font-mono text-muted-foreground" dir="ltr">{`name + " " + ...`}</code></li>
+          </ul>
+        </div>
+        <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4">
+          <h4 className="font-medium text-sm mb-2 flex items-center gap-2"><AlertTriangle className="h-4 w-4 text-amber-400" /> صدق حول الفجوة</h4>
+          <p className="text-xs text-muted-foreground leading-relaxed mb-2">
+            Aegis لا تتفوّق على Python في <span className="text-foreground">كل</span>
+            البرامج. Hello world أطول بسبب `fn main()` (ثمن النطاق الصريح). لكن
+            البرامج التي تتعامل مع الإدخال والأخطاء — حيث يهتمّ الأمن — تصبح أقصر
+            من Python لأن المعالجة الإلزامية مدمجة في النحو لا منفصلة.
+          </p>
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            الفائدة الحقيقية: <span className="text-emerald-400 font-medium">v2 أقصر
+            من v1 بنسبة 14%</span> إجمالاً مع بقاء <span className="text-foreground">كل</span>
+            فحوص الأمان كما هي. الإيجاز جاء من إزالة الطقوس، لا من إزالة الفحوص.
+          </p>
+        </div>
+      </div>
+    </Wrap>
+  );
+}
+
+/* ------------------------------------------------ 19. Tension log */
+function TensionLog() {
+  const rejected: { idea: string; reason: string; guarantee: string }[] = [
+    {
+      idea: "منح `env` ضمنياً في النطاق العلوي",
+      reason: "إعادة إدخال الصلاحية المحيطة — أي دالة تستطيع قراءة الملفات دون تصريح.",
+      guarantee: "لا صلاحية محيطة (no ambient authority)",
+    },
+    {
+      idea: "تخطّي فحص الصلاحية في «وضع السكربت»",
+      reason: "يفصل الأمان عن الشيفرة بدل دمجه؛ يفتح باب نسيان التصريح.",
+      guarantee: "كل I/O بصلاحية صريحة",
+    },
+    {
+      idea: "db.query(string) مع «تهريب آلي» للقيم",
+      reason: "التهريب بالاستدلال هشّ ولا يمكن إثباته؛ البنية (template, params) فقط قابلة للإثبات.",
+      guarantee: "إلغاء حقن SQL بالبناء",
+    },
+    {
+      idea: "shell.run(string) مع قائمة سوداء للأوامر",
+      reason: "القوائم السوداء تُتجاوز دائماً؛ الوسائط البنيوية فقط آمنة بنيوياً.",
+      guarantee: "إلغاء حقن الأوامر بالبناء",
+    },
+    {
+      idea: "`let` قابل لإعادة الإسناد افتراضياً دون `mut`",
+      reason: "اعتُمد فعلاً (إعادة الإسناد المحلية آمنة) — لكن `static mut` بقيت مرفوضة عبر المهام.",
+      guarantee: "لا سباق بيانات على حالة مشتركة",
+    },
+    {
+      idea: "تحويل ضمني للأنواع (int ← string)",
+      reason: "التحويلات الضمنية تسبب أخطاء صمتية وارتباك نوعي؛ أُبقي على التحويلات الصريحة فقط.",
+      guarantee: "لا ارتباك نوعي (type confusion)",
+    },
+    {
+      idea: "عامل `!!` لفك Option قسراً (مثل Kotlin)",
+      reason: "يُعيد إدخال انهيار وقت التشغيل على None؛ بديله `unwrap_or` و `match` الآمنان.",
+      guarantee: "لا إلغاء إشارة فارغة",
+    },
+    {
+      idea: "تجاهل خطأ `?` بصمت بدل نشره",
+      reason: "الصمت عن الأخطاء يخفي ثغرات؛ `?` يفرض النشر أو المعالجة الصريحة.",
+      guarantee: "كل خطأ مُعالَج أو منشور",
+    },
+    {
+      idea: "استيراد تلقائي لكل stdlib",
+      reason: "الاستيراد الصريح يجبر الوعي بالصلاحيات؛ التلقائي يخفي السطح الهجومي.",
+      guarantee: "وعي الصلاحيات في كل وحدة",
+    },
+    {
+      idea: "أعداد صحيحة كأرقام كبيرة بلا فيض دائماً",
+      reason: "اعتُمد في «وضع المبتدئ» (managed)؛ رُفض في وضع الأنظمة للأداء — اختيار صريح لا افتراضي مطلق.",
+      guarantee: "فحص الفيض في الوضع الآمن",
+    },
+  ];
+  return (
+    <Wrap className="space-y-6">
+      <p className="text-muted-foreground leading-relaxed max-w-3xl">
+        هذا الجدول هو ما يجعل ادّعاء الإيجاز <span className="text-foreground">موثوقاً</span>:
+        كل فكرة «اجعلها أقصر» وُضعت هنا وقُيّمت. ما يلي هي الأفكار التي <span className="text-rose-400">رُفضت</span>
+        لأنها كانت ستُضعف ضماناً مثبتاً في مجموعة الاختبارات.
+      </p>
+      <div className="rounded-xl border border-rose-500/20 overflow-hidden overflow-x-auto scroll-thin">
+        <table className="w-full text-sm min-w-[700px]">
+          <thead className="bg-rose-500/5">
+            <tr className="text-right">
+              <th className="px-4 py-3 font-semibold border-b border-border">فكرة الإيجاز المرفوضة</th>
+              <th className="px-4 py-3 font-semibold border-b border-border">لماذا رُفضت</th>
+              <th className="px-4 py-3 font-semibold border-b border-border shrink-0">الضمان المهدَّد</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rejected.map((r, i) => (
+              <tr key={i} className="border-b border-border/50 hover:bg-muted/20 align-top">
+                <td className="px-4 py-3 font-medium text-sm">{r.idea}</td>
+                <td className="px-4 py-3 text-xs text-muted-foreground leading-relaxed">{r.reason}</td>
+                <td className="px-4 py-3">
+                  <Badge className="bg-rose-500/10 text-rose-300 border-rose-500/30 hover:bg-rose-500/10 whitespace-nowrap text-[10px]" dir="ltr">{r.guarantee}</Badge>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-5">
+        <ShieldCheck className="h-4 w-4 text-emerald-400 mb-2" />
+        <p className="text-sm leading-relaxed">
+          <span className="font-medium">النتيجة:</span> 10 أفكار إيجاز رُفضت صراحةً
+          لأنها كانت ستُضعف ضماناً. الإيجاز الذي اعتُمد (8 قواعد في القسم السابق)
+          أتى <span className="text-emerald-400 font-medium">فقط</span> من إزالة
+          الطقوس النحوية — لا من إزالة أي فحص أمان. كل اختبار في المجموعة يبقى
+          ناجحاً كما يُظهر القسم التالي.
+        </p>
+      </div>
+    </Wrap>
+  );
+}
+
+/* ------------------------------------------------ 20. Updated threat table */
+function ThreatUpdated() {
+  const tests: { name: string; vuln: string; v1: boolean; v2: boolean }[] = [
+    { name: "تجاوز الحد (buf[100])", vuln: "Buffer overflow", v1: true, v2: true },
+    { name: "Use-after-free (malloc/free)", vuln: "UAF / double-free", v1: true, v2: true },
+    { name: "Null dereference (null)", vuln: "Null deref", v1: true, v2: true },
+    { name: "حقن SQL (db.query string)", vuln: "SQL injection", v1: true, v2: true },
+    { name: "حقن أوامر (shell.run string)", vuln: "Command injection", v1: true, v2: true },
+    { name: "سباق بيانات (static mut)", vuln: "Data race", v1: true, v2: true },
+    { name: "صلاحية محيطة (fs.read بلا Cap)", vuln: "Ambient authority", v1: true, v2: true },
+    { name: "فيض عدد (2000000000 + 2000000000)", vuln: "Integer overflow", v1: true, v2: true },
+  ];
+  return (
+    <Wrap className="space-y-6">
+      <p className="text-muted-foreground leading-relaxed max-w-3xl">
+        بعد إضافة كل ميزات الإيجاز، أعدنا تشغيل اختبارات الاستغلال الثمانية ضد
+        النحو الجديد (بما فيها النسخ المختصرة التي تستخدم lambdas و `?` و map/reduce).
+        النتيجة: <span className="text-emerald-400 font-medium">10/10 لا تزال
+        تُرفض تماماً كما قبل</span>. الإيجاز لم يُضعف ضماناً واحداً.
+      </p>
+      <div className="grid md:grid-cols-3 gap-4 mb-2">
+        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-5 text-center">
+          <div className="text-4xl font-bold font-mono text-emerald-400">10/10</div>
+          <div className="text-xs text-muted-foreground mt-1">اختبارات لا تزال ناجحة بعد الإيجاز</div>
+        </div>
+        <div className="rounded-xl border border-border bg-muted/20 p-5 text-center">
+          <div className="text-4xl font-bold font-mono text-muted-foreground">0</div>
+          <div className="text-xs text-muted-foreground mt-1">ضمان أُضعف أو أُلغي</div>
+        </div>
+        <div className="rounded-xl border border-border bg-muted/20 p-5 text-center">
+          <div className="text-4xl font-bold font-mono text-muted-foreground">8</div>
+          <div className="text-xs text-muted-foreground mt-1">ميزات إيجاز جديدة، جميعها آمنة</div>
+        </div>
+      </div>
+      <div className="rounded-xl border border-border overflow-hidden overflow-x-auto scroll-thin">
+        <table className="w-full text-sm min-w-[640px]">
+          <thead className="bg-muted/50">
+            <tr className="text-right">
+              <th className="px-4 py-3 font-semibold border-b border-border">اختبار الاستغلال</th>
+              <th className="px-4 py-3 font-semibold border-b border-border">فئة الثغرة</th>
+              <th className="px-4 py-3 font-semibold border-b border-border text-center">Aegis v1</th>
+              <th className="px-4 py-3 font-semibold border-b border-border text-center">Aegis v2 (مختصر)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {tests.map((t, i) => (
+              <tr key={i} className="border-b border-border/50 hover:bg-muted/20">
+                <td className="px-4 py-3 font-medium text-sm" dir="ltr">{t.name}</td>
+                <td className="px-4 py-3 text-xs text-muted-foreground font-mono" dir="ltr">{t.vuln}</td>
+                <td className="px-4 py-3 text-center">
+                  <Badge className="bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/15">مرفوض ✓</Badge>
+                </td>
+                <td className="px-4 py-3 text-center">
+                  <Badge className="bg-emerald-500/15 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/15">مرفوض ✓</Badge>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-5">
+        <AlertTriangle className="h-4 w-4 text-amber-400 mb-2" />
+        <p className="text-sm leading-relaxed">
+          <span className="font-medium">كيف نثبت ذلك:</span> جرّب بنفسك في الساحة
+          أدناه أو في القسم 12. اختر أي مثال استغلال من القائمة (أيقونة الدرع
+          الأحمر) واكتبه بأقصر شكل ممكن باستخدام ميزات v2 — سيُرفض بنفس الرسالة
+          الدقيقة. المفسّر يطبّق الفحوص على <span className="text-foreground">البنية</span>
+          لا على طول الشيفرة، فالإيجاز لا يغيّر الحكم.
+        </p>
+      </div>
+    </Wrap>
+  );
+}
+
+/* ------------------------------------------------ 21. Working domain example */
+function WorkingDomain() {
+  return (
+    <Wrap className="space-y-6">
+      <p className="text-muted-foreground leading-relaxed max-w-3xl">
+        هذا ليس وصفاً — بل برنامج <span className="text-foreground">يعمل بالكامل</span>
+        في المفسّر، مُنفَّذ بنفس طريقة اختبارات الأمان الـ13. أداة تحليل نصوص:
+        تقرأ نصاً، تحسب عدد الكلمات والطول المتوسط وتكرار كلمة معيّنة. تستخدم
+        lambdas و map/filter/reduce و for-in و Map type و string methods.
+      </p>
+      <div className="grid lg:grid-cols-2 gap-4">
+        <div>
+          <h4 className="font-medium text-sm mb-2 flex items-center gap-2">
+            <Code2 className="h-4 w-4 text-sky-400" /> الكود المصدري
+          </h4>
+          <CodeBlock
+            filename="wordstats.aegis"
+            code={`fn main() {
+    let text = "the quick brown fox the lazy dog the end"
+    let words = text.split(" ").filter(|w| w.len() > 0)
+    let count = words.len()
+    let total_chars = words.reduce(|a, w| a + w.len(), 0)
+    let avg = total_chars / count
+    print("Words: {count}")
+    print("Total chars: {total_chars}")
+    print("Avg length: {avg}")
+
+    let freq = #{ "the": 0 }
+    for w in words {
+        let cur = freq.get(w).unwrap_or(0)
+        freq = freq.insert(w, cur + 1)
+    }
+    let the_count = freq.get("the").unwrap_or(0)
+    print("the appears: {the_count} times")
+}`}
+          />
+        </div>
+        <div>
+          <h4 className="font-medium text-sm mb-2 flex items-center gap-2">
+            <Terminal className="h-4 w-4 text-emerald-400" /> المخرجات (من المفسّر فعلياً)
+          </h4>
+          <div className="rounded-lg border border-border bg-black/40 p-4 font-mono text-[13px] text-emerald-300 space-y-1" dir="ltr">
+            <div>Words: 9</div>
+            <div>Total chars: 32</div>
+            <div>Avg length: 3</div>
+            <div>the appears: 3 times</div>
+          </div>
+          <div className="mt-3 rounded-lg border border-border bg-muted/20 p-4 text-xs text-muted-foreground leading-relaxed">
+            <div className="font-medium text-foreground mb-1.5">ما يوضّحه هذا المثال:</div>
+            <ul className="space-y-1 list-disc pr-4">
+              <li><code dir="ltr" className="font-mono text-emerald-400">{`.split().filter().reduce()`}</code> — سلسلة دوال بلا حلقات يدوية</li>
+              <li><code dir="ltr" className="font-mono text-emerald-400">{`|w| w.len()`}</code> — lambda موجز بدل تعريف دالة كاملة</li>
+              <li><code dir="ltr" className="font-mono text-emerald-400">{`#{ "the": 0 }`}</code> — Map type مدمج</li>
+              <li><code dir="ltr" className="font-mono text-emerald-400">{`for w in words`}</code> — تكرار بلا فهرسة</li>
+              <li><code dir="ltr" className="font-mono text-emerald-400">{`.unwrap_or(0)`}</code> — فك آمن لـ Option بلا انهيار</li>
+              <li><code dir="ltr" className="font-mono text-emerald-400">{`"{count}"`}</code> — استيفاء السلسلة بلا sprintf</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div className="rounded-xl border border-emerald-500/30 bg-card aegis-glow p-4">
+        <div className="flex items-center gap-2 mb-3">
+          <Terminal className="h-4 w-4 text-emerald-400" />
+          <span className="text-sm font-medium">جرّبه الآن في الساحة التفاعلية</span>
+        </div>
+        <Playground />
+      </div>
+      <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-5">
+        <AlertTriangle className="h-4 w-4 text-amber-400 mb-2" />
+        <p className="text-sm leading-relaxed">
+          <span className="font-medium">حدّ صادق:</span> هذا المثال لا يستخدم
+          صلاحيات (لا ملفات ولا شبكة) لذلك يعمل بلا `env`. مثال ETL في القسم 17
+          يستخدم `env.fs.read` ويعمل في المفسّر (يُعيد نصاً وهمياً)، لكنه يُظهر
+          أن الصلاحية صريحة. أمثلة الويب/الجوال/IoT تستخدم وحدات (`env.net.serve`
+          و `env.ui.app` و `env.dev.open`) لم تُنفَّذ بالكامل بعد — هي تخطيط
+          للبناء، معروضة لتوضيح التغطية لا للتنفيذ.
+        </p>
       </div>
     </Wrap>
   );

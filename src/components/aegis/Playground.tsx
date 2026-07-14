@@ -4,7 +4,7 @@ import { useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
-import { Play, Loader2, ShieldCheck, ShieldX, Terminal } from "lucide-react";
+import { Play, Loader2, ShieldCheck, ShieldX, Terminal, Boxes, Zap } from "lucide-react";
 import { EXAMPLES, type Example } from "@/lib/aegis/examples";
 import { cn } from "@/lib/utils";
 
@@ -64,6 +64,10 @@ export default function Playground() {
                 <span className="font-medium truncate">{ex.arabicTitle}</span>
                 {ex.category === "exploit" ? (
                   <ShieldX className="h-3.5 w-3.5 text-rose-400 shrink-0" />
+                ) : ex.category === "domain" ? (
+                  <Boxes className="h-3.5 w-3.5 text-sky-400 shrink-0" />
+                ) : ex.category === "brevity" ? (
+                  <Zap className="h-3.5 w-3.5 text-amber-400 shrink-0" />
                 ) : (
                   <ShieldCheck className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
                 )}

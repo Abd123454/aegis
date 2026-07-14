@@ -1,8 +1,8 @@
 /**
- * Aegis — Reference Interpreter (subset)
+ * Aegis — Reference Interpreter (extended subset)
  * ---------------------------------------
  * From-scratch tokenizer, recursive-descent parser, static capability/safety
- * analyzer, and tree-walking evaluator for a meaningful subset of Aegis.
+ * analyzer, and tree-walking evaluator.
  *
  * Security properties enforced (each traceable to a named vulnerability class):
  *  - NO `null` literal                     -> null-dereference crashes
@@ -14,6 +14,18 @@
  *  - db.query accepts ONLY (template, params)    -> SQL injection
  *  - shell.run accepts ONLY structured args       -> command injection
  *  - spawn requires `move` capture                -> data races via shared mutable state
+ *
+ * Brevity features added in phase 2 (NONE weaken any guarantee above):
+ *  - Implicit returns (last expr of block)        -> removes `return` ceremony
+ *  - Full type inference (`let x = 5`)            -> removes type annotations
+ *  - `?` early-exit operator                      -> removes match-on-Err boilerplate
+ *  - String interpolation `"{var}"`               -> removes format-string calls
+ *  - Lambdas `|x| expr`                           -> removes `fn(x) -> T { ... }` for closures
+ *  - `for x in iter { }`                          -> removes manual indexing
+ *  - Pipeline `a |> f`  (= f(a))                  -> removes nested-call parens
+ *  - Struct field punning `Point { x, y }`        -> removes `x: x` repetition
+ *  - Map literal `#{ k: v }` + Map type           -> removes verbose builder calls
+ *  - String/Array methods (split/upper/map/filter/reduce) -> removes loop boilerplate
  *
  * Honest limits: this is NOT a full borrow checker (we simulate move-semantics for
  * spawn), NOT formally verified, and does NOT eliminate business-logic bugs,
@@ -43,6 +55,7 @@ export type Val =
   | { k: "str"; v: string }
   | { k: "bool"; v: boolean }
   | { k: "array"; v: Val[] }
+  | { k: "map"; v: Map<string, Val> }
   | { k: "unit" }
   | { k: "some"; v: Val }
   | { k: "none" }
@@ -62,7 +75,7 @@ type Tok = { t: string; v: string; line: number; col: number };
 const KEYWORDS = new Set([
   "fn","let","mut","if","else","match","return","struct","impl",
   "spawn","move","true","false","Ok","Err","Some","None","print",
-  "loop","break","for","in","as","Cap",
+  "loop","break","for","in","as","Cap","continue",
 ]);
 
 const FORBIDDEN_TOKENS: Record<string, string> = {
@@ -138,7 +151,6 @@ function tokenize(src: string): { toks: Tok[]; diags: Diag[] } {
     if (/[A-Za-z_]/.test(c)) {
       let id = "";
       while (i < src.length && /[A-Za-z0-9_]/.test(src[i])) { id += src[i]; i++; col++; }
-      // detect `static mut`
       if (id === "static") {
         let j = i; while (j < src.length && (src[j] === " " || src[j] === "\t")) j++;
         if (src.slice(j, j + 3) === "mut") {
@@ -161,8 +173,10 @@ function tokenize(src: string): { toks: Tok[]; diags: Diag[] } {
       push("forbidden", "&"); i++; col++; continue;
     }
     if (c === "*") { push("star", "*"); i++; col++; continue; }
+    if (c === "#") { push("#", "#"); i++; col++; continue; }
     const two = src.slice(i, i + 2);
-    if (["=>","==","!=","<=",">=","->","&&","||"].includes(two)) { push(two, two); i += 2; col += 2; continue; }
+    if (["=>","==","!=","<=",">=","->","&&","||","|>"].includes(two)) { push(two, two); i += 2; col += 2; continue; }
+    if (c === "|") { push("|", "|"); i++; col++; continue; }
     if ("+-/%(){}[],:;=<>?.".includes(c)) { push(c, c); i++; col++; continue; }
     diags.push({ kind: "error", phase: "parse", line, col, msg: `Unexpected character '${c}'.` });
     i++; col++;
@@ -181,6 +195,7 @@ type Expr =
   | { n: "BoolLit"; v: boolean }
   | { n: "Ident"; name: string; line: number; col: number }
   | { n: "Array"; elems: Expr[] }
+  | { n: "MapLit"; pairs: { key: string; val: Expr }[]; line: number; col: number }
   | { n: "Index"; arr: Expr; idx: Expr; line: number; col: number }
   | { n: "Call"; callee: Expr; args: Expr[]; line: number; col: number }
   | { n: "Method"; recv: Expr; name: string; args: Expr[]; line: number; col: number }
@@ -191,7 +206,7 @@ type Expr =
   | { n: "Match"; scrut: Expr; arms: { pat: string; binds: string[]; body: Stmt[] }[]; line: number }
   | { n: "Block"; body: Stmt[] }
   | { n: "Try"; e: Expr; line: number; col: number }
-  | { n: "StructLit"; name: string; fields: { name: string; val: Expr }[]; line: number }
+  | { n: "StructLit"; name: string; fields: { name: string; val: Expr; punned: boolean }[]; line: number }
   | { n: "Some"; e: Expr }
   | { n: "None" }
   | { n: "Ok"; e: Expr }
@@ -205,7 +220,9 @@ type Stmt =
   | { n: "Return"; expr: Expr | null; line: number }
   | { n: "Fn"; name: string; params: { name: string; ty: string }[]; ret: string | null; body: Stmt[]; hasCap: boolean; line: number }
   | { n: "Struct"; name: string; fields: { name: string; ty: string }[] }
-  | { n: "Impl"; name: string; methods: any[] };
+  | { n: "Impl"; name: string; methods: any[] }
+  | { n: "ForIn"; var: string; iter: Expr; body: Stmt[]; line: number }
+  | { n: "Assign"; name: string; expr: Expr; line: number };
 
 type Item = Stmt;
 
@@ -214,6 +231,9 @@ type Item = Stmt;
 // ---------------------------------------------------------------------------
 class Parser {
   toks: Tok[]; pos = 0; diags: Diag[] = [];
+  // When parsing if/match conditions we disallow struct literals to avoid
+  // ambiguity with blocks (same rule as Rust).
+  noStructLit = false;
   constructor(toks: Tok[]) { this.toks = toks; }
   peek(o = 0): Tok { return this.toks[this.pos + o] || this.toks[this.toks.length - 1]; }
   next(): Tok { return this.toks[this.pos++]; }
@@ -240,6 +260,7 @@ class Parser {
     if (t.t === "struct") return this.parseStruct();
     if (t.t === "impl") return this.parseImpl();
     if (t.t === "let") { const s = this.parseLet(); return s; }
+    if (t.t === "for") { const s = this.parseFor(); return s; }
     if (t.t === "forbidden") { this.next(); return null; }
     const e = this.parseExpr();
     if (e) { this.eat(";"); return { n: "Expr", expr: e } as Item; }
@@ -324,11 +345,31 @@ class Parser {
     this.eat(";");
     return { n: "Let", mut: !!mut, name, ty, expr, line };
   }
+  parseFor(): Stmt {
+    const line = this.peek().line;
+    this.eat("for");
+    const v = this.peek().t === "ident" ? this.next().v : "_";
+    this.expect("in", "'in'");
+    const iter = this.parseExpr();
+    const body = this.parseBlock();
+    return { n: "ForIn", var: v, iter: iter!, body, line };
+  }
   parseBlock(): Stmt[] {
     this.expect("{", "'{'");
     const body: Stmt[] = [];
     while (!this.check("}") && !this.check("eof")) {
       if (this.check("let")) { body.push(this.parseLet()); continue; }
+      if (this.check("for")) { body.push(this.parseFor()); continue; }
+      // assignment: `ident = expr`  (not `==`, not a field assign — local rebinding only)
+      if (this.peek().t === "ident" && this.peek(1).t === "=") {
+        const line = this.peek().line;
+        const name = this.next().v;
+        this.eat("=");
+        const expr = this.parseExpr();
+        this.eat(";");
+        body.push({ n: "Assign", name, expr: expr!, line });
+        continue;
+      }
       if (this.check("return")) {
         const line = this.peek().line;
         this.eat("return");
@@ -346,7 +387,18 @@ class Parser {
     this.expect("}", "'}'");
     return body;
   }
-  parseExpr(): Expr | null { return this.parseOr(); }
+  parseExpr(): Expr | null { return this.parsePipeline(); }
+  parsePipeline(): Expr | null {
+    let l = this.parseOr();
+    while (this.check("|>")) {
+      const t = this.peek(); this.next();
+      const r = this.parsePostfix();
+      if (!l || !r) return null;
+      // desugar `a |> f` into `f(a)`
+      l = { n: "Call", callee: r, args: [l], line: t.line, col: t.col };
+    }
+    return l;
+  }
   parseOr(): Expr | null {
     let l = this.parseAnd();
     while (this.check("||")) { const t = this.peek(); this.next(); const r = this.parseAnd(); if (!l || !r) return null; l = { n: "Bin", op: "||", l, r, line: t.line }; }
@@ -399,6 +451,10 @@ class Parser {
         else { e = { n: "Field", recv: e, name }; }
       } else if (this.check("(")) { const args = this.parseArgs(); e = { n: "Call", callee: e, args, line: 0, col: 0 }; }
       else if (this.check("[")) { const t = this.peek(); this.next(); const idx = this.parseExpr(); this.expect("]", "']'"); e = { n: "Index", arr: e, idx: idx!, line: t.line, col: t.col }; }
+      else if (!this.noStructLit && e.n === "Ident" && /^[A-Z]/.test(e.name) && this.check("{")) {
+        // struct literal: Ident { fields }
+        e = this.parseStructLit(e);
+      }
       else break;
     }
     return e;
@@ -409,6 +465,60 @@ class Parser {
     while (!this.check(")") && !this.check("eof")) { const a = this.parseExpr(); if (a) args.push(a); this.eat(","); }
     this.expect(")", "')'");
     return args;
+  }
+  parseStructLit(head: { n: "Ident"; name: string; line: number; col: number }): Expr {
+    const line = head.line, col = head.col;
+    this.expect("{", "'{'");
+    const fields: { name: string; val: Expr; punned: boolean }[] = [];
+    while (!this.check("}") && !this.check("eof")) {
+      const fn = this.peek().t === "ident" ? this.next().v : "_";
+      if (this.check(":")) {
+        this.eat(":");
+        const val = this.parseExpr();
+        fields.push({ name: fn, val: val!, punned: false });
+      } else {
+        // field punning: `Point { x, y }` == `Point { x: x, y: y }`
+        fields.push({ name: fn, val: { n: "Ident", name: fn, line, col }, punned: true });
+      }
+      this.eat(",");
+    }
+    this.expect("}", "'}'");
+    return { n: "StructLit", name: head.name, fields, line, col };
+  }
+  parseLambda(): Expr {
+    const t = this.peek();
+    this.eat("|");
+    const params: string[] = [];
+    while (!this.check("|") && !this.check("eof")) {
+      if (this.peek().t === "ident") { params.push(this.next().v); }
+      else { this.next(); } // skip unexpected, avoid infinite loop
+      this.eat(",");
+    }
+    this.expect("|", "'|'");
+    let body: Stmt[];
+    if (this.check("{")) { body = this.parseBlock(); }
+    else { const e = this.parseExpr(); body = e ? [{ n: "Expr", expr: e }] : []; }
+    return { n: "Closure", params, body, line: t.line, col: t.col } as any;
+  }
+  parseMapLit(): Expr {
+    const t = this.peek();
+    this.eat("#");
+    this.expect("{", "'{'");
+    const pairs: { key: string; val: Expr }[] = [];
+    while (!this.check("}") && !this.check("eof")) {
+      // key must be a string literal
+      const kt = this.peek();
+      let key = "";
+      if (kt.t === "str") { this.next(); const p = JSON.parse(kt.v); key = p.lit; }
+      else if (kt.t === "ident") { this.next(); key = kt.v; }
+      else { this.next(); key = "?"; }
+      this.expect(":", "':' in map literal");
+      const val = this.parseExpr();
+      pairs.push({ key, val: val! });
+      this.eat(",");
+    }
+    this.expect("}", "'}'");
+    return { n: "MapLit", pairs, line: t.line, col: t.col };
   }
   parsePrimary(): Expr | null {
     const t = this.peek();
@@ -421,6 +531,7 @@ class Parser {
     if (t.t === "Ok") { this.next(); const e = this.parsePostfix(); return e ? { n: "Ok", e } : null; }
     if (t.t === "Err") { this.next(); const e = this.parsePostfix(); return e ? { n: "Err", e } : null; }
     if (t.t === "ident" || t.t === "print") { this.next(); return { n: "Ident", name: t.v, line: t.line, col: t.col }; }
+    if (t.t === "|") return this.parseLambda();
     if (t.t === "(") { this.next(); const e = this.parseExpr(); this.expect(")", "')'"); return e; }
     if (t.t === "[") {
       this.next(); const elems: Expr[] = [];
@@ -428,8 +539,9 @@ class Parser {
       this.expect("]", "']'");
       return { n: "Array", elems };
     }
-    if (t.t === "if") return this.parseIf();
-    if (t.t === "match") return this.parseMatch();
+    if (t.t === "#") return this.parseMapLit();
+    if (t.t === "if") { this.noStructLit = true; const e = this.parseIf(); this.noStructLit = false; return e; }
+    if (t.t === "match") { this.noStructLit = true; const e = this.parseMatch(); this.noStructLit = false; return e; }
     if (t.t === "spawn") return this.parseSpawn();
     if (t.t === "{") return { n: "Block", body: this.parseBlock() };
     if (t.t === "forbidden") { this.next(); return { n: "Unit" }; }
@@ -438,6 +550,7 @@ class Parser {
   parseIf(): Expr {
     this.eat("if");
     const cond = this.parseExpr();
+    this.noStructLit = false;
     const then = this.parseBlock();
     let els: Stmt[] | null = null;
     if (this.eat("else")) { els = this.check("if") ? [{ n: "Expr", expr: this.parseIf() }] : this.parseBlock(); }
@@ -447,6 +560,7 @@ class Parser {
     const t = this.peek();
     this.eat("match");
     const scrut = this.parseExpr();
+    this.noStructLit = false;
     this.expect("{", "'{'");
     const arms: { pat: string; binds: string[]; body: Stmt[] }[] = [];
     while (!this.check("}") && !this.check("eof")) {
@@ -459,14 +573,9 @@ class Parser {
         else pat = head;
       } else { pat = pk.v; this.next(); }
       this.expect("=>", "'=>'");
-      // arm body: either a block { ... } or a single expression
       let body: Stmt[];
-      if (this.check("{")) {
-        body = this.parseBlock();
-      } else {
-        const e = this.parseExpr();
-        body = e ? [{ n: "Expr", expr: e }] : [];
-      }
+      if (this.check("{")) { body = this.parseBlock(); }
+      else { const e = this.parseExpr(); body = e ? [{ n: "Expr", expr: e }] : []; }
       arms.push({ pat, binds, body });
       this.eat(",");
     }
@@ -507,7 +616,7 @@ function analyze(items: Item[]): Diag[] {
   const diags: Diag[] = [];
   function walkStmts(stmts: Stmt[], hasCap: boolean, locals: Set<string>) { for (const s of stmts) walkStmt(s, hasCap, locals); }
   function walkStmt(s: Stmt, hasCap: boolean, locals: Set<string>) {
-    if (s.n === "Let") { walkExpr(s.expr, hasCap, locals); locals.add(s.name); if (s.ty === "Cap") { /* cap introduced */ } }
+    if (s.n === "Let") { walkExpr(s.expr, hasCap, locals); locals.add(s.name); }
     else if (s.n === "Expr") walkExpr(s.expr, hasCap, locals);
     else if (s.n === "Return") { if (s.expr) walkExpr(s.expr, hasCap, locals); }
     else if (s.n === "Fn") {
@@ -515,6 +624,8 @@ function analyze(items: Item[]): Diag[] {
       for (const p of s.params) { ls.add(p.name); if (p.ty === "Cap") hc = true; }
       walkStmts(s.body, hc, ls);
     }
+    else if (s.n === "ForIn") { walkExpr(s.iter, hasCap, locals); const ls = new Set(locals); ls.add(s.var); walkStmts(s.body, hasCap, ls); }
+    else if (s.n === "Assign") { walkExpr(s.expr, hasCap, locals); }
   }
   function walkExpr(e: Expr, hasCap: boolean, locals: Set<string>) {
     if (!e) return;
@@ -538,6 +649,7 @@ function analyze(items: Item[]): Diag[] {
       case "Field": walkExpr(e.recv, hasCap, locals); break;
       case "Index": walkExpr(e.arr, hasCap, locals); walkExpr(e.idx, hasCap, locals); break;
       case "Array": for (const el of e.elems) walkExpr(el, hasCap, locals); break;
+      case "MapLit": for (const p of e.pairs) walkExpr(p.val, hasCap, locals); break;
       case "If": walkExpr(e.cond, hasCap, locals); walkStmts(e.then, hasCap, locals); if (e.els) walkStmts(e.els, hasCap, locals); break;
       case "Match": walkExpr(e.scrut, hasCap, locals); for (const a of e.arms) walkStmts(a.body, hasCap, new Set(locals)); break;
       case "Block": walkStmts(e.body, hasCap, locals); break;
@@ -556,6 +668,7 @@ function analyze(items: Item[]): Diag[] {
 // ---------------------------------------------------------------------------
 class ReturnSignal { constructor(public val: Val) {} }
 class TrySignal { constructor(public val: Val) {} }
+class BreakSignal {} 
 class EvalErr extends Error { constructor(public msg: string, public line: number, public col: number) { super(msg); } }
 
 function valToStr(v: Val, depth = 0): string {
@@ -565,6 +678,10 @@ function valToStr(v: Val, depth = 0): string {
     case "bool": return v.v ? "true" : "false";
     case "unit": return "()";
     case "array": return "[" + v.v.map((x) => valToStr(x, depth + 1)).join(", ") + "]";
+    case "map": {
+      const es = Array.from(v.v.entries()).map(([k, x]) => `${k}: ${valToStr(x, depth + 1)}`).join(", ");
+      return "#{ " + es + " }";
+    }
     case "some": return "Some(" + valToStr(v.v, depth + 1) + ")";
     case "none": return "None";
     case "ok": return "Ok(" + valToStr(v.v, depth + 1) + ")";
@@ -616,6 +733,8 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
   globals.set("shell", makeModule("shell"));
   globals.set("db", makeModule("db"));
   globals.set("print", { k: "fn", name: "print", params: [], body: [], closure: new Map(), caps: false });
+  globals.set("sqrt", { k: "fn", name: "sqrt", params: ["x"], body: [], closure: new Map(), caps: false });
+  globals.set("len", { k: "fn", name: "len", params: ["x"], body: [], closure: new Map(), caps: false });
 
   for (const it of items) {
     if (it.n === "Fn") globals.set(it.name, { k: "fn", name: it.name, params: it.params.map((p) => p.name), body: it.body, closure: globals, caps: it.hasCap });
@@ -627,17 +746,36 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
     }
   }
 
+  // Helper: call a fn value with positional args (used by map/filter/reduce)
+  const applyFn = (fnVal: Val, args: Val[]): Val => {
+    if (fnVal.k !== "fn") throw new EvalErr("Expected a function.", 0, 0);
+    if (fnVal.name === "sqrt") return { k: "float", v: Math.sqrt((args[0] as any).v) };
+    if (fnVal.name === "len") {
+      const a = args[0];
+      if (a.k === "str" || a.k === "array") return { k: "int", v: a.v.length };
+      if (a.k === "map") return { k: "int", v: a.v.size };
+      throw new EvalErr("len() expects str/array/map.", 0, 0);
+    }
+    const local: Env = new Map(fnVal.closure);
+    for (let i = 0; i < fnVal.params.length; i++) local.set(fnVal.params[i], args[i]);
+    try { return execBlock(fnVal.body, local); }
+    catch (sig) { if (sig instanceof ReturnSignal) return sig.val; throw sig; }
+  };
+
   const evalExpr = (e: Expr, env: Env): Val => {
     switch (e.n) {
       case "IntLit": return { k: "int", v: e.v };
       case "FloatLit": return { k: "float", v: e.v };
       case "BoolLit": return { k: "bool", v: e.v };
       case "StrLit": {
-        let s = e.lit;
+        // Assembly order: each part contributes (literal, then interpolated expr),
+        // and e.lit holds the FINAL trailing literal (may be "").
+        let s = "";
         for (const part of e.parts) {
           s += part.lit;
           if (part.expr) { const v = evalExpr(parseInnerExpr(part.expr), env); s += valToStr(v); }
         }
+        s += e.lit;
         return { k: "str", v: s };
       }
       case "None": return { k: "none" };
@@ -651,13 +789,25 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
         throw new EvalErr(`Undefined identifier '${e.name}'.`, e.line, e.col);
       }
       case "Array": return { k: "array", v: e.elems.map((el) => evalExpr(el, env)) };
+      case "MapLit": {
+        const m = new Map<string, Val>();
+        for (const p of e.pairs) m.set(p.key, evalExpr(p.val, env));
+        return { k: "map", v: m };
+      }
       case "Index": {
         const arr = evalExpr(e.arr, env);
         const idx = evalExpr(e.idx, env);
-        if (arr.k !== "array") throw new EvalErr("Indexing a non-array value.", e.line, e.col);
-        if (idx.k !== "int") throw new EvalErr("Array index must be Int.", e.line, e.col);
-        if (idx.v < 0 || idx.v >= arr.v.length) return { k: "none" };
-        return { k: "some", v: arr.v[idx.v] };
+        if (arr.k === "array") {
+          if (idx.k !== "int") throw new EvalErr("Array index must be Int.", e.line, e.col);
+          if (idx.v < 0 || idx.v >= arr.v.length) return { k: "none" };
+          return { k: "some", v: arr.v[idx.v] };
+        }
+        if (arr.k === "map") {
+          if (idx.k !== "str") throw new EvalErr("Map index must be String.", e.line, e.col);
+          if (!arr.v.has(idx.v)) return { k: "none" };
+          return { k: "some", v: arr.v.get(idx.v)! };
+        }
+        throw new EvalErr("Indexing a non-indexable value.", e.line, e.col);
       }
       case "Bin": return evalBin(e, env);
       case "Unary": {
@@ -679,7 +829,11 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
       case "Field": { const recv = evalExpr(e.recv, env); if (recv.k === "struct" && e.name in recv.fields) return recv.fields[e.name]; throw new EvalErr(`No field '${e.name}'.`, 0, 0); }
       case "Call": return evalCall(e, env);
       case "Method": return evalMethod(e, env);
-      case "StructLit": { const fields: Record<string, Val> = {}; for (const f of e.fields) fields[f.name] = evalExpr(f.val, env); return { k: "struct", name: e.name, fields }; }
+      case "StructLit": {
+        const fields: Record<string, Val> = {};
+        for (const f of e.fields) fields[f.name] = evalExpr(f.val, env);
+        return { k: "struct", name: e.name, fields };
+      }
       case "Closure": return { k: "fn", name: "<closure>", params: e.params, body: e.body, closure: env, caps: false };
       default: throw new EvalErr(`Cannot evaluate node ${(e as any).n}.`, 0, 0);
     }
@@ -758,9 +912,27 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
     let last: Val = { k: "unit" };
     for (const s of stmts) {
       if (s.n === "Let") { const v = evalExpr(s.expr, env); env.set(s.name, v); last = { k: "unit" }; }
+      else if (s.n === "Assign") {
+        // Local rebinding. This is single-thread mutation only; spawn(move)
+        // captures a copy of the env, so cross-task mutation remains impossible.
+        const v = evalExpr(s.expr, env);
+        env.set(s.name, v);
+        last = { k: "unit" };
+      }
       else if (s.n === "Expr") { last = evalExpr(s.expr, env); }
       else if (s.n === "Return") { throw new ReturnSignal(s.expr ? evalExpr(s.expr, env) : { k: "unit" }); }
       else if (s.n === "Fn") { env.set(s.name, { k: "fn", name: s.name, params: s.params.map((p) => p.name), body: s.body, closure: env, caps: s.hasCap }); }
+      else if (s.n === "ForIn") {
+        const iter = evalExpr(s.iter, env);
+        if (iter.k !== "array") throw new EvalErr("`for` expects an iterable (array).", s.line, 0);
+        for (const el of iter.v) {
+          // Bind loop var in the SAME env so mutations to outer locals persist.
+          env.set(s.var, el);
+          try { execBlock(s.body, env); }
+          catch (sig) { if (sig instanceof BreakSignal) break; throw sig; }
+        }
+        last = { k: "unit" };
+      }
     }
     return last;
   }
@@ -778,20 +950,24 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
       const result = execBlock(clos.body, local);
       return { k: "struct", name: "TaskHandle", fields: { result, __done: { k: "bool", v: true } } };
     }
+    if (e.callee.n === "Ident" && (e.callee.name === "len" || e.callee.name === "sqrt")) {
+      const args = e.args.map((a) => evalExpr(a, env));
+      return applyFn(globals.get(e.callee.name)!, args);
+    }
     const callee = evalExpr(e.callee, env);
     if (callee.k !== "fn") throw new EvalErr(`Calling a non-function (${callee.k}).`, e.line, e.col);
-    const local: Env = new Map(callee.closure);
-    for (let i = 0; i < callee.params.length; i++) local.set(callee.params[i], evalExpr(e.args[i], env));
-    try { return execBlock(callee.body, local); }
-    catch (sig) { if (sig instanceof ReturnSignal) return sig.val; throw sig; }
+    const args = e.args.map((a) => evalExpr(a, env));
+    return applyFn(callee, args);
   }
 
   function evalMethod(e: Extract<Expr, { n: "Method" }>, env: Env): Val {
     const recv = evalExpr(e.recv, env);
+    // capability-gated modules
     if (recv.k === "struct" && recv.name === "Module") {
       const mod = recv.fields.__mod.v as string;
       if (mod === "fs" && e.name === "read") return { k: "ok", v: { k: "str", v: "[file contents]" } };
       if (mod === "net" && e.name === "fetch") return { k: "ok", v: { k: "str", v: "[network response]" } };
+      if (mod === "net" && e.name === "post") return { k: "ok", v: { k: "str", v: "[posted]" } };
       if (mod === "shell" && e.name === "run") {
         if (e.args.length !== 1) throw new EvalErr("shell.run expects exactly one array argument.", e.line, e.col);
         const arg = evalExpr(e.args[0], env);
@@ -818,14 +994,107 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
       }
     }
     if (recv.k === "struct" && recv.name === "TaskHandle" && e.name === "join") return { k: "ok", v: recv.fields.result };
-    // builtin methods on strings/arrays
-    if (recv.k === "str" && e.name === "len") return { k: "int", v: recv.v.length };
-    if (recv.k === "array" && e.name === "len") return { k: "int", v: recv.v.length };
-    if (recv.k === "array" && e.name === "push") { /* immutable; return new */ return recv; }
-    if (recv.k === "str" && e.name === "parse_int") {
-      const n = parseInt(recv.v, 10);
-      return isNaN(n) ? { k: "none" } : { k: "some", v: { k: "int", v: n } };
+
+    // ----- String methods -----
+    if (recv.k === "str") {
+      if (e.name === "len") return { k: "int", v: recv.v.length };
+      if (e.name === "upper") return { k: "str", v: recv.v.toUpperCase() };
+      if (e.name === "lower") return { k: "str", v: recv.v.toLowerCase() };
+      if (e.name === "trim") return { k: "str", v: recv.v.trim() };
+      if (e.name === "contains") {
+        const a = evalExpr(e.args[0], env);
+        return { k: "bool", v: a.k === "str" && recv.v.includes(a.v) };
+      }
+      if (e.name === "split") {
+        const a = evalExpr(e.args[0], env);
+        if (a.k !== "str") throw new EvalErr("split() expects a String separator.", e.line, e.col);
+        const parts = recv.v.split(a.v);
+        return { k: "array", v: parts.map((s) => ({ k: "str", v: s })) };
+      }
+      if (e.name === "parse_int") {
+        const n = parseInt(recv.v, 10);
+        return isNaN(n) ? { k: "none" } : { k: "some", v: { k: "int", v: n } };
+      }
+      if (e.name === "parse_float") {
+        const n = parseFloat(recv.v);
+        return isNaN(n) ? { k: "none" } : { k: "some", v: { k: "float", v: n } };
+      }
     }
+
+    // ----- Array methods -----
+    if (recv.k === "array") {
+      if (e.name === "len") return { k: "int", v: recv.v.length };
+      if (e.name === "push") return recv; // immutable stub
+      if (e.name === "map") {
+        const f = evalExpr(e.args[0], env);
+        return { k: "array", v: recv.v.map((el) => applyFn(f, [el])) };
+      }
+      if (e.name === "filter") {
+        const f = evalExpr(e.args[0], env);
+        const out: Val[] = [];
+        for (const el of recv.v) { const r = applyFn(f, [el]); if (r.k === "bool" && r.v) out.push(el); }
+        return { k: "array", v: out };
+      }
+      if (e.name === "reduce") {
+        const f = evalExpr(e.args[0], env);
+        let acc = evalExpr(e.args[1], env);
+        for (const el of recv.v) acc = applyFn(f, [acc, el]);
+        return acc;
+      }
+      if (e.name === "sort") {
+        const sorted = [...recv.v].sort((a, b) => {
+          const av = (a as any).v; const bv = (b as any).v;
+          if (typeof av === "number" && typeof bv === "number") return av - bv;
+          return String(av).localeCompare(String(bv));
+        });
+        return { k: "array", v: sorted };
+      }
+      if (e.name === "join") {
+        const a = evalExpr(e.args[0], env);
+        const sep = a.k === "str" ? a.v : " ";
+        return { k: "str", v: recv.v.map((x) => valToStr(x)).join(sep) };
+      }
+      if (e.name === "first") return recv.v.length ? { k: "some", v: recv.v[0] } : { k: "none" };
+      if (e.name === "last") return recv.v.length ? { k: "some", v: recv.v[recv.v.length - 1] } : { k: "none" };
+    }
+
+    // ----- Map methods -----
+    if (recv.k === "map") {
+      if (e.name === "len") return { k: "int", v: recv.v.size };
+      if (e.name === "get") {
+        const a = evalExpr(e.args[0], env);
+        if (a.k !== "str") throw new EvalErr("map.get() expects a String key.", e.line, e.col);
+        return recv.v.has(a.v) ? { k: "some", v: recv.v.get(a.v)! } : { k: "none" };
+      }
+      if (e.name === "insert") {
+        const k = evalExpr(e.args[0], env);
+        const v = evalExpr(e.args[1], env);
+        if (k.k !== "str") throw new EvalErr("map.insert() expects a String key.", e.line, e.col);
+        const m = new Map(recv.v); m.set(k.v, v);
+        return { k: "map", v: m };
+      }
+      if (e.name === "entries") {
+        const out: Val[] = [];
+        for (const [k, v] of recv.v) out.push({ k: "array", v: [{ k: "str", v: k }, v] });
+        return { k: "array", v: out };
+      }
+      if (e.name === "keys") return { k: "array", v: Array.from(recv.v.keys()).map((s) => ({ k: "str", v: s })) };
+      if (e.name === "values") return { k: "array", v: Array.from(recv.v.values()) };
+    }
+
+    // ----- Option methods -----
+    if (recv.k === "some") {
+      if (e.name === "unwrap_or") return recv.v;            // Some(x).unwrap_or(_) == x
+      if (e.name === "unwrap") return recv.v;
+      if (e.name === "is_some") return { k: "bool", v: true };
+      if (e.name === "is_none") return { k: "bool", v: false };
+    }
+    if (recv.k === "none") {
+      if (e.name === "unwrap_or") return e.args.length ? evalExpr(e.args[0], env) : { k: "unit" };  // None.unwrap_or(d) == d
+      if (e.name === "is_some") return { k: "bool", v: false };
+      if (e.name === "is_none") return { k: "bool", v: true };
+    }
+
     throw new EvalErr(`No method '${e.name}' on ${recv.k === "struct" ? recv.name : recv.k}.`, e.line, e.col);
   }
 
@@ -834,6 +1103,10 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
       if (it.n === "Fn" || it.n === "Struct" || it.n === "Impl") continue;
       if (it.n === "Let") { const v = evalExpr(it.expr, globals); globals.set(it.name, v); }
       else if (it.n === "Expr") evalExpr(it.expr, globals);
+      else if (it.n === "ForIn") {
+        const iter = evalExpr(it.iter, globals);
+        if (iter.k === "array") for (const el of iter.v) { const local = new Map(globals); local.set(it.var, el); execBlock(it.body, local); }
+      }
     }
     if (globals.has("main")) {
       const mainFn = globals.get("main")!;
@@ -847,6 +1120,7 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
   } catch (err: any) {
     if (err instanceof EvalErr) { diagnostics.push({ kind: "error", phase: "runtime", line: err.line, col: err.col, msg: err.msg }); return { ok: false, output, diagnostics }; }
     if (err instanceof ReturnSignal) { /* fine */ }
+    else if (err instanceof BreakSignal) { /* fine */ }
     else { diagnostics.push({ kind: "error", phase: "runtime", line: 0, col: 0, msg: String(err && err.message ? err.message : err) }); return { ok: false, output, diagnostics }; }
   }
 
