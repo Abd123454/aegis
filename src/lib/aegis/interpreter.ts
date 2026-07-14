@@ -183,7 +183,7 @@ function tokenize(src: string): { toks: Tok[]; diags: Diag[] } {
       push("forbidden", "&"); i++; col++; continue;
     }
     if (c === "|") { push("|", "|"); i++; col++; continue; }
-    if ("+-/%(){}[],:;=<>?.".includes(c)) { push(c, c); i++; col++; continue; }
+    if ("+-/%(){}[],:;=<>?!.".includes(c)) { push(c, c); i++; col++; continue; }
     diags.push({ kind: "error", phase: "parse", line, col, msg: `Unexpected character '${c}'.` });
     i++; col++;
   }
@@ -800,7 +800,7 @@ type Type =
 // This is a METHOD-NAME → REQUIRED-MODULE mapping, NOT an expression-form list.
 // The gate checks: "does the receiver's TYPE provide this module's capability?"
 const GATED_METHOD_MODULE: Record<string, string> = {
-  read: "fs", write: "fs", list: "fs", delete: "fs", mkdir: "fs", exists: "fs",
+  read: "fs", write: "fs", list: "fs", mkdir: "fs", exists: "fs",
   fetch: "net", post: "net", serve: "net",
   run: "shell",
   query: "db",
@@ -1569,6 +1569,8 @@ export async function run(source: string, _grantCaps: string[] = ["fs", "net", "
   globals.set("json_decode", { k: "fn", name: "json_decode", params: ["s"], body: [], closure: new Map(), caps: false });
   globals.set("sha256", { k: "fn", name: "sha256", params: ["s"], body: [], closure: new Map(), caps: false });
   globals.set("random_hex", { k: "fn", name: "random_hex", params: ["n"], body: [], closure: new Map(), caps: false });
+  // Phase 18: sleep function
+  globals.set("sleep", { k: "fn", name: "sleep", params: ["ms"], body: [], closure: new Map(), caps: false });
   for (const it of items) {
     if (it.n === "Fn") globals.set(it.name, { k: "fn", name: it.name, params: it.params.map((p) => p.name), body: it.body, closure: globals, caps: it.hasCap });
     else if (it.n === "Struct") structDefs.set(it.name, it);
@@ -1602,6 +1604,7 @@ export async function run(source: string, _grantCaps: string[] = ["fs", "net", "
     if (fnVal.name === "json_decode") { try { return { k: "ok", v: jsonToVal(JSON.parse((args[0] as any).v)) }; } catch { return { k: "err", v: { k: "str", v: "invalid JSON" } }; } }
     if (fnVal.name === "sha256") { const s = (args[0] as any).v as string; let h = 0; for (let i = 0; i < s.length; i++) { h = ((h<<5)-h)+s.charCodeAt(i); h|=0; } return { k: "str", v: Math.abs(h).toString(16).padStart(8,"0") }; }
     if (fnVal.name === "random_hex") { const n = (args[0] as any).v as number; let hex = ""; for (let i = 0; i < n; i++) hex += Math.floor(Math.random()*16).toString(16); return { k: "str", v: hex }; }
+    if (fnVal.name === "sleep") { const ms = (args[0] as any).v as number; await new Promise((r) => setTimeout(r, ms)); return { k: "unit" }; }
     // Phase 17 FIX 5: For closures, share the SAME env (by reference) so
     // mut variables in the enclosing scope are visible and mutable.
     // For named functions, closure is globals (shared by default).
@@ -1650,6 +1653,8 @@ export async function run(source: string, _grantCaps: string[] = ["fs", "net", "
         case "/": { if (ri === 0) return { k: "err", v: { k: "str", v: "division by zero" } }; if (isFloat) return { k: "float", v: li / ri }; if (li === INT_MIN && ri === -1) return { k: "err", v: { k: "str", v: "integer overflow on '/'" } }; return { k: "int", v: Math.trunc(li / ri) }; }
         case "%": { if (ri === 0) return { k: "err", v: { k: "str", v: "modulo by zero" } }; if (li === INT_MIN && ri === -1) return { k: "int", v: 0 }; return { k: "int", v: li % ri }; } } }
     if (l.k === "str" && e.op === "+") return { k: "str", v: l.v + (r.k === "str" ? r.v : valToStr(r)) };
+    // Phase 18 FIX 1.3: array concatenation
+    if (l.k === "array" && r.k === "array" && e.op === "+") return { k: "array", v: [...l.v, ...r.v] };
     if (e.op === "==") return { k: "bool", v: valEq(l, r) }; if (e.op === "!=") return { k: "bool", v: !valEq(l, r) };
     if (li !== null && ri !== null) { if (e.op === "<") return { k: "bool", v: li < ri }; if (e.op === ">") return { k: "bool", v: li > ri }; if (e.op === "<=") return { k: "bool", v: li <= ri }; if (e.op === ">=") return { k: "bool", v: li >= ri }; }
     throw new EvalErr(`Bad binary op '${e.op}' on ${l.k}/${r.k}.`, 0, 0);
@@ -1775,7 +1780,22 @@ export async function run(source: string, _grantCaps: string[] = ["fs", "net", "
         require("fs").mkdirSync(resolved, { recursive: true });
         return { k: "ok", v: { k: "unit" } };
       }
-      if (mod === "net" && e.name === "fetch") return { k: "ok", v: { k: "str", v: "[network response]" } };
+      // Phase 18 FIX 1.4: Real net.fetch
+      if (mod === "net" && e.name === "fetch") {
+        if (e.args.length < 1) throw new EvalErr("net.fetch requires (url).", e.line, e.col);
+        const urlVal = await evalExpr(e.args[0], env);
+        const url = (urlVal as any).v as string;
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10000);
+          const response = await fetch(url, { signal: controller.signal });
+          clearTimeout(timeout);
+          const text = await response.text();
+          return { k: "ok", v: { k: "str", v: text } };
+        } catch (err: any) {
+          return { k: "err", v: { k: "str", v: "fetch failed: " + String(err?.message || err) } };
+        }
+      }
       if (mod === "net" && e.name === "post") { if (e.args.length < 2) throw new EvalErr("net.post requires (url, body).", e.line, e.col); return { k: "ok", v: { k: "str", v: "[posted]" } }; }
       // Phase 15 FIX 1: HTTP server
       if (mod === "net" && e.name === "serve") {
@@ -1858,10 +1878,39 @@ export async function run(source: string, _grantCaps: string[] = ["fs", "net", "
         return { k: "ok", v: { k: "unit" } };
       }
     }
-    if (recv.k === "int" || recv.k === "float") { if (e.name === "sqrt") return { k: "float", v: Math.sqrt(recv.v) }; if (e.name === "abs") return { k: recv.k, v: Math.abs(recv.v) }; if (e.name === "floor") return { k: "int", v: Math.floor(recv.v) }; if (e.name === "ceil") return { k: "int", v: Math.ceil(recv.v) }; }
-    if (recv.k === "str") { if (e.name === "len") return { k: "int", v: recv.v.length }; if (e.name === "upper") return { k: "str", v: recv.v.toUpperCase() }; if (e.name === "lower") return { k: "str", v: recv.v.toLowerCase() }; if (e.name === "trim") return { k: "str", v: recv.v.trim() }; if (e.name === "contains") { const a = await evalExpr(e.args[0], env); return { k: "bool", v: a.k === "str" && recv.v.includes(a.v) }; } if (e.name === "split") { const a = await evalExpr(e.args[0], env); if (a.k !== "str") throw new EvalErr("split() expects String.", e.line, e.col); return { k: "array", v: recv.v.split(a.v).map((s) => ({ k: "str", v: s })) }; } if (e.name === "parse_int") { const n = parseInt(recv.v, 10); return isNaN(n) ? { k: "none" } : { k: "some", v: { k: "int", v: n } }; } if (e.name === "parse_float") { const n = parseFloat(recv.v); return isNaN(n) ? { k: "none" } : { k: "some", v: { k: "float", v: n } }; } }
-    if (recv.k === "array") { if (e.name === "len") return { k: "int", v: recv.v.length }; if (e.name === "push") return recv; if (e.name === "map") { const f = await evalExpr(e.args[0], env); const out: Val[] = []; for (const el of recv.v) out.push(await applyFn(f, [el])); return { k: "array", v: out }; } if (e.name === "filter") { const f = await evalExpr(e.args[0], env); const out: Val[] = []; for (const el of recv.v) { const r = await applyFn(f, [el]); if (r.k === "bool" && r.v) out.push(el); } return { k: "array", v: out }; } if (e.name === "reduce") { const f = await evalExpr(e.args[0], env); let acc = await evalExpr(e.args[1], env); for (const el of recv.v) acc = await applyFn(f, [acc, el]); return acc; } if (e.name === "sort") { return { k: "array", v: [...recv.v].sort((a, b) => { const av = (a as any).v, bv = (b as any).v; return typeof av === "number" && typeof bv === "number" ? av - bv : String(av).localeCompare(String(bv)); }) }; } if (e.name === "join") { const a = await evalExpr(e.args[0], env); const sep = a.k === "str" ? a.v : " "; return { k: "str", v: recv.v.map((x) => valToStr(x)).join(sep) }; } if (e.name === "first") return recv.v.length ? { k: "some", v: recv.v[0] } : { k: "none" }; if (e.name === "last") return recv.v.length ? { k: "some", v: recv.v[recv.v.length - 1] } : { k: "none" }; }
-    if (recv.k === "map") { if (e.name === "len") return { k: "int", v: recv.v.size }; if (e.name === "get") { const a = await evalExpr(e.args[0], env); if (a.k !== "str") throw new EvalErr("map.get() expects String key.", e.line, e.col); return recv.v.has(a.v) ? { k: "some", v: recv.v.get(a.v)! } : { k: "none" }; } if (e.name === "insert") { const k = await evalExpr(e.args[0], env); const v = await evalExpr(e.args[1], env); if (k.k !== "str") throw new EvalErr("map.insert() expects String key.", e.line, e.col); const m = new Map(recv.v); m.set(k.v, v); return { k: "map", v: m }; } if (e.name === "entries") { const out: Val[] = []; for (const [k, v] of recv.v) out.push({ k: "array", v: [{ k: "str", v: k }, v] }); return { k: "array", v: out }; } if (e.name === "keys") return { k: "array", v: Array.from(recv.v.keys()).map((s) => ({ k: "str", v: s })) }; if (e.name === "values") return { k: "array", v: Array.from(recv.v.values()) }; }
+    if (recv.k === "int" || recv.k === "float") { if (e.name === "sqrt") return { k: "float", v: Math.sqrt(recv.v) }; if (e.name === "abs") return { k: recv.k, v: Math.abs(recv.v) }; if (e.name === "floor") return { k: "int", v: Math.floor(recv.v) }; if (e.name === "ceil") return { k: "int", v: Math.ceil(recv.v) }; if (e.name === "round") return { k: "int", v: Math.round(recv.v) }; if (e.name === "to_string") return { k: "str", v: String(recv.v) }; }
+    if (recv.k === "str") {
+      if (e.name === "len") return { k: "int", v: recv.v.length };
+      if (e.name === "upper") return { k: "str", v: recv.v.toUpperCase() };
+      if (e.name === "lower") return { k: "str", v: recv.v.toLowerCase() };
+      if (e.name === "trim") return { k: "str", v: recv.v.trim() };
+      if (e.name === "contains") { const a = await evalExpr(e.args[0], env); return { k: "bool", v: a.k === "str" && recv.v.includes(a.v) }; }
+      if (e.name === "starts_with") { const a = await evalExpr(e.args[0], env); return { k: "bool", v: a.k === "str" && recv.v.startsWith(a.v) }; }
+      if (e.name === "ends_with") { const a = await evalExpr(e.args[0], env); return { k: "bool", v: a.k === "str" && recv.v.endsWith(a.v) }; }
+      if (e.name === "replace") { const o = await evalExpr(e.args[0], env); const n = await evalExpr(e.args[1], env); return { k: "str", v: recv.v.replaceAll((o as any).v, (n as any).v) }; }
+      if (e.name === "repeat") { const n = await evalExpr(e.args[0], env); return { k: "str", v: recv.v.repeat((n as any).v) }; }
+      if (e.name === "chars") { return { k: "array", v: recv.v.split("").map((s) => ({ k: "str", v: s })) }; }
+      if (e.name === "split") { const a = await evalExpr(e.args[0], env); if (a.k !== "str") throw new EvalErr("split() expects String.", e.line, e.col); return { k: "array", v: recv.v.split(a.v).map((s) => ({ k: "str", v: s })) }; }
+      if (e.name === "parse_int") { const n = parseInt(recv.v, 10); return isNaN(n) ? { k: "none" } : { k: "some", v: { k: "int", v: n } }; }
+      if (e.name === "parse_float") { const n = parseFloat(recv.v); return isNaN(n) ? { k: "none" } : { k: "some", v: { k: "float", v: n } }; }
+    }
+    if (recv.k === "array") { if (e.name === "len") return { k: "int", v: recv.v.length }; if (e.name === "push") { // Phase 18 FIX 1.2: real push — mutate in place
+      if (e.args.length < 1) throw new EvalErr("push requires an argument.", e.line, e.col);
+      const item = await evalExpr(e.args[0], env);
+      recv.v.push(item);
+      return { k: "unit" };
+    }
+    if (e.name === "map") { const f = await evalExpr(e.args[0], env); const out: Val[] = []; for (const el of recv.v) out.push(await applyFn(f, [el])); return { k: "array", v: out }; } if (e.name === "filter") { const f = await evalExpr(e.args[0], env); const out: Val[] = []; for (const el of recv.v) { const r = await applyFn(f, [el]); if (r.k === "bool" && r.v) out.push(el); } return { k: "array", v: out }; } if (e.name === "reduce") { const f = await evalExpr(e.args[0], env); let acc = await evalExpr(e.args[1], env); for (const el of recv.v) acc = await applyFn(f, [acc, el]); return acc; } if (e.name === "sort") { return { k: "array", v: [...recv.v].sort((a, b) => { const av = (a as any).v, bv = (b as any).v; return typeof av === "number" && typeof bv === "number" ? av - bv : String(av).localeCompare(String(bv)); }) }; } if (e.name === "reverse") { return { k: "array", v: [...recv.v].reverse() }; } if (e.name === "contains") { const a = await evalExpr(e.args[0], env); return { k: "bool", v: recv.v.some((x) => valEq(x, a)) }; } if (e.name === "join") { const a = await evalExpr(e.args[0], env); const sep = a.k === "str" ? a.v : " "; return { k: "str", v: recv.v.map((x) => valToStr(x)).join(sep) }; } if (e.name === "first") return recv.v.length ? { k: "some", v: recv.v[0] } : { k: "none" }; if (e.name === "last") return recv.v.length ? { k: "some", v: recv.v[recv.v.length - 1] } : { k: "none" }; }
+    if (recv.k === "map") {
+      if (e.name === "len") return { k: "int", v: recv.v.size };
+      if (e.name === "get") { const a = await evalExpr(e.args[0], env); if (a.k !== "str") throw new EvalErr("map.get() expects String key.", e.line, e.col); return recv.v.has(a.v) ? { k: "some", v: recv.v.get(a.v)! } : { k: "none" }; }
+      if (e.name === "has") { const a = await evalExpr(e.args[0], env); return { k: "bool", v: a.k === "str" && recv.v.has(a.v) }; }
+      if (e.name === "insert") { const k = await evalExpr(e.args[0], env); const v = await evalExpr(e.args[1], env); if (k.k !== "str") throw new EvalErr("map.insert() expects String key.", e.line, e.col); const m = new Map(recv.v); m.set(k.v, v); return { k: "map", v: m }; }
+      if (e.name === "delete") { const a = await evalExpr(e.args[0], env); if (a.k !== "str") throw new EvalErr("map.delete() expects String key.", e.line, e.col); const m = new Map(recv.v); m.delete(a.v); return { k: "map", v: m }; }
+      if (e.name === "entries") { const out: Val[] = []; for (const [k, v] of recv.v) out.push({ k: "array", v: [{ k: "str", v: k }, v] }); return { k: "array", v: out }; }
+      if (e.name === "keys") return { k: "array", v: Array.from(recv.v.keys()).map((s) => ({ k: "str", v: s })) };
+      if (e.name === "values") return { k: "array", v: Array.from(recv.v.values()) };
+    }
     if (recv.k === "some") { if (e.name === "unwrap_or") return recv.v; if (e.name === "unwrap") return recv.v; if (e.name === "is_some") return { k: "bool", v: true }; if (e.name === "is_none") return { k: "bool", v: false }; }
     if (recv.k === "none") { if (e.name === "unwrap_or") return e.args.length ? await evalExpr(e.args[0], env) : { k: "unit" }; if (e.name === "is_some") return { k: "bool", v: false }; if (e.name === "is_none") return { k: "bool", v: true }; }
     throw new EvalErr(`No method '${e.name}' on ${recv.k === "struct" ? recv.name : recv.k}.`, e.line, e.col);

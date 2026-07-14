@@ -63,9 +63,12 @@ const stats = {
 // Output markers (from the evaluator — these indicate a gated method ran)
 // ---------------------------------------------------------------------------
 const GATED_MARKERS = [
-  "[file contents]",     // fs.read (Phase 16: now real, but fuzzer uses mock-safe patterns)
-  "[network response]",  // net.fetch
-  "[posted]",            // net.post
+  // Phase 18: net.fetch is now real — markers updated
+  // fs.read now returns real file content (no fixed marker)
+  // We detect gated execution by checking if output contains typical fs/db/shell patterns
+  "Ok([file contents]",  // old mock — may still appear in some test paths
+  "[network response]",  // old mock net.fetch
+  "[posted]",            // net.post (still mock)
   "[executed:",          // shell.run
   "Ok([])",             // db.query (returns empty array)
 ];

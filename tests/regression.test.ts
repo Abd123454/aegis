@@ -62,13 +62,15 @@ describe("Regression: 5 canonical programs", () => {
   });
 
   test("concurrent task with spawn(move, ...)", async () => {
+    // Phase 18: net.fetch is now real — test with a reliable URL or expect error
     const r = await run(`fn main(env: Cap) {
-      let handle = spawn(move || { env.net.fetch("https://api.example.com")? })
+      let handle = spawn(move || { env.net.fetch("https://httpbin.org/get")? })
       match handle.join() {
-        Ok(text) => print("Got: {text}"),
+        Ok(text) => print("Got response"),
         Err(e) => print("Failed: {e}"),
       }
     }`);
+    // Accept either success or failure (network may not be available in CI)
     expect(r.ok).toBe(true);
   });
 });
