@@ -809,6 +809,14 @@ function inferType(
   fnRet: Map<string, Type>,
   depth: { d: number; max: number }
 ): Type {
+  // PHASE 8: Build a static map of impl method return types.
+  // Key: "StructName::methodName", Value: return Type.
+  // This is built lazily on first call and cached.
+  // NOTE: We can't build this at module load because we don't have the items.
+  // Instead, typeCheck builds implMethodRet and passes it via fnRet (which
+  // already maps fn names to return types). We use the convention that
+  // impl method return types are stored under "StructName::methodName".
+  // So if fnRet has "Wrapper::get_fs", that's an impl method return type.
   if (depth.d++ > depth.max) { depth.d--; return { k: "other" }; }
   try {
     switch (e.n) {
@@ -849,8 +857,15 @@ function inferType(
         return { k: "other" };
       }
       case "Method": {
-        // Methods generally return non-cap types (read returns String, etc.)
-        // The capability gate is checked separately in typeCheck.
+        // PHASE 8: Look up impl method return type.
+        // If the receiver is a known struct and the method is in fnRet
+        // under "StructName::methodName", return that type.
+        const recvTy = inferType(e.recv, ctx, sft, fnRet, depth);
+        if (recvTy.k === "struct") {
+          const key = `${recvTy.name}::${e.name}`;
+          if (fnRet.has(key)) return fnRet.get(key)!;
+        }
+        // Otherwise, methods return non-cap types (read returns String, etc.)
         return { k: "other" };
       }
       case "Try": {
@@ -894,9 +909,20 @@ function typeCheck(items: Item[]): Diag[] {
   }
 
   // 2. Build function return type table: fnName -> return Type
+  //    PHASE 8: Also include impl method return types under "StructName::methodName"
+  //    so inferType can resolve them during body type-checking.
   const fnRet = new Map<string, Type>();
   for (const it of items) {
     if (it.n === "Fn" && it.ret) fnRet.set(it.name, parseTy(it.ret));
+  }
+  for (const it of items) {
+    if (it.n === "Impl") {
+      for (const m of it.methods) {
+        if (m && m.n === "Fn" && m.ret) {
+          fnRet.set(`${it.name}::${m.name}`, parseTy(m.ret));
+        }
+      }
+    }
   }
 
   // 3. Build function parameter type table: fnName -> (paramName -> Type)
@@ -929,6 +955,24 @@ function typeCheck(items: Item[]): Diag[] {
       const methods = implMethods.get(it.name)!;
       for (const m of it.methods) {
         if (m && m.n === "Fn") methods.add(m.name);
+      }
+    }
+  }
+
+  // PHASE 8: Build impl method parameter type table for argument type checking.
+  // Key: "StructName::methodName", Value: ordered list of {name, ty} for params (excluding self).
+  const implParamOrder = new Map<string, { name: string; ty: Type }[]>();
+  for (const it of items) {
+    if (it.n === "Impl") {
+      for (const m of it.methods) {
+        if (!m || m.n !== "Fn") continue;
+        const key = `${it.name}::${m.name}`;
+        const order: { name: string; ty: Type }[] = [];
+        for (const p of m.params) {
+          if (p.name === "self") continue;
+          order.push({ name: p.name, ty: parseTy(p.ty) });
+        }
+        implParamOrder.set(key, order);
       }
     }
   }
@@ -973,7 +1017,7 @@ function typeCheck(items: Item[]): Diag[] {
     return true;
   }
 
-  // 4. Type-check each function body
+  // 4. Type-check each function body, tracking return type for verification
   for (const it of items) {
     if (it.n !== "Fn") continue;
     const ctx = new Map<string, Type>();
@@ -983,36 +1027,69 @@ function typeCheck(items: Item[]): Diag[] {
       ctx.set(pname, pty);
       ownScope.add(pname);
     }
-    walkStmts(it.body, ctx, ownScope, 0);
+    // PHASE 8: Track the declared return type so Return statements can be verified
+    const declaredRet = it.ret ? parseTy(it.ret) : null;
+    walkStmts(it.body, ctx, ownScope, 0, declaredRet, it.name);
   }
 
-  // 5. Type-check top-level non-fn/struct/impl items
+  // 5. Type-check impl method bodies (PHASE 8 — was missing entirely)
+  for (const it of items) {
+    if (it.n !== "Impl") continue;
+    for (const m of it.methods) {
+      if (!m || m.n !== "Fn") continue;
+      const ctx = new Map<string, Type>();
+      const ownScope = new Set<string>();
+      // self is the struct type
+      ctx.set("self", { k: "struct", name: it.name });
+      ownScope.add("self");
+      for (const p of m.params) {
+        if (p.name === "self") continue;
+        const pty = parseTy(p.ty);
+        ctx.set(p.name, pty);
+        ownScope.add(p.name);
+      }
+      const declaredRet = m.ret ? parseTy(m.ret) : null;
+      // Use a synthetic name for error messages
+      const methodName = `${it.name}::${m.name}`;
+      walkStmts(m.body, ctx, ownScope, 0, declaredRet, methodName);
+    }
+  }
+
+  // 6. Type-check top-level non-fn/struct/impl items
   for (const it of items) {
     if (it.n === "Fn" || it.n === "Struct" || it.n === "Impl") continue;
-    walkStmt(it, new Map(), new Set(), 0);
+    walkStmt(it, new Map(), new Set(), 0, null, "<top-level>");
   }
 
   return diags;
 
   // --- Walking functions (with depth tracking — P1 fix) ---
-  function walkStmts(stmts: Stmt[], ctx: Map<string, Type>, ownScope: Set<string>, depth: number) {
+  // PHASE 8: added `declaredRet` and `fnName` params for return-type verification
+  function walkStmts(stmts: Stmt[], ctx: Map<string, Type>, ownScope: Set<string>, depth: number, declaredRet: Type | null, fnName: string) {
     if (depth > 256) return;
-    for (const s of stmts) walkStmt(s, ctx, ownScope, depth);
+    for (const s of stmts) walkStmt(s, ctx, ownScope, depth, declaredRet, fnName);
   }
 
-  function walkStmt(s: Stmt, ctx: Map<string, Type>, ownScope: Set<string>, depth: number) {
+  function walkStmt(s: Stmt, ctx: Map<string, Type>, ownScope: Set<string>, depth: number, declaredRet: Type | null, fnName: string) {
     if (depth > 256) return;
     if (s.n === "Let") {
       // P2 fix: null-check before inferType
       if (s.expr) {
-        walkExpr(s.expr, ctx, ownScope, depth);
+        walkExpr(s.expr, ctx, ownScope, depth, declaredRet, fnName);
         const ty = inferType(s.expr, ctx, sft, fnRet, { d: 0, max: 256 });
+        // PHASE 8: Verify typed let binding (Site 4)
+        if (s.ty) {
+          const declaredTy = parseTy(s.ty);
+          if (!typesCompatible(ty, declaredTy)) {
+            diags.push({ kind: "error", phase: "check", line: s.line, col: 0, msg: `Type error in let binding: '${s.name}' is declared as ${formatType(declaredTy)} but the expression has type ${formatType(ty)}.` });
+          }
+        }
         ctx.set(s.name, ty);
       }
       ownScope.add(s.name);
     } else if (s.n === "Assign") {
       if (s.expr) {
-        walkExpr(s.expr, ctx, ownScope, depth);
+        walkExpr(s.expr, ctx, ownScope, depth, declaredRet, fnName);
         if (!ownScope.has(s.name)) {
           diags.push({ kind: "error", phase: "check", line: s.line, col: 0, msg: `Cannot assign to captured variable '${s.name}'. Closures capture by value; mutation of captured variables is not supported.` });
         }
@@ -1020,9 +1097,18 @@ function typeCheck(items: Item[]): Diag[] {
         ctx.set(s.name, ty);
       }
     } else if (s.n === "Expr") {
-      if (s.expr) walkExpr(s.expr, ctx, ownScope, depth);
+      if (s.expr) walkExpr(s.expr, ctx, ownScope, depth, declaredRet, fnName);
     } else if (s.n === "Return") {
-      if (s.expr) walkExpr(s.expr, ctx, ownScope, depth);
+      if (s.expr) {
+        walkExpr(s.expr, ctx, ownScope, depth, declaredRet, fnName);
+        // PHASE 8: Verify return type (Site 2)
+        if (declaredRet) {
+          const retTy = inferType(s.expr, ctx, sft, fnRet, { d: 0, max: 256 });
+          if (!typesCompatible(retTy, declaredRet)) {
+            diags.push({ kind: "error", phase: "check", line: s.line, col: 0, msg: `Type error in return from '${fnName}': declared return type is ${formatType(declaredRet)} but the expression has type ${formatType(retTy)}.` });
+          }
+        }
+      }
     } else if (s.n === "Fn") {
       const nestedCtx = new Map(ctx);
       const nestedOwn = new Set<string>();
@@ -1032,25 +1118,26 @@ function typeCheck(items: Item[]): Diag[] {
         nestedOwn.add(p.name);
       }
       if (s.ret) fnRet.set(s.name, parseTy(s.ret));
-      walkStmts(s.body, nestedCtx, nestedOwn, depth + 1);
+      const nestedRet = s.ret ? parseTy(s.ret) : null;
+      walkStmts(s.body, nestedCtx, nestedOwn, depth + 1, nestedRet, s.name);
     } else if (s.n === "ForIn") {
-      if (s.iter) walkExpr(s.iter, ctx, ownScope, depth);
+      if (s.iter) walkExpr(s.iter, ctx, ownScope, depth, declaredRet, fnName);
       const nestedCtx = new Map(ctx);
       nestedCtx.set(s.var, { k: "other" });
       const nestedOwn = new Set(ownScope);
       nestedOwn.add(s.var);
-      walkStmts(s.body, nestedCtx, nestedOwn, depth + 1);
+      walkStmts(s.body, nestedCtx, nestedOwn, depth + 1, declaredRet, fnName);
     }
   }
 
-  function walkExpr(e: Expr, ctx: Map<string, Type>, ownScope: Set<string>, depth: number) {
+  function walkExpr(e: Expr, ctx: Map<string, Type>, ownScope: Set<string>, depth: number, declaredRet: Type | null, fnName: string) {
     if (!e || depth > 256) return;
     switch (e.n) {
-      case "Bin": walkExpr(e.l, ctx, ownScope, depth + 1); walkExpr(e.r, ctx, ownScope, depth + 1); break;
-      case "Unary": walkExpr(e.e, ctx, ownScope, depth + 1); break;
+      case "Bin": walkExpr(e.l, ctx, ownScope, depth + 1, declaredRet, fnName); walkExpr(e.r, ctx, ownScope, depth + 1, declaredRet, fnName); break;
+      case "Unary": walkExpr(e.e, ctx, ownScope, depth + 1, declaredRet, fnName); break;
       case "Call":
-        walkExpr(e.callee, ctx, ownScope, depth + 1);
-        // FIX B: Check argument types against declared parameter types
+        walkExpr(e.callee, ctx, ownScope, depth + 1, declaredRet, fnName);
+        // FIX B: Check argument types against declared parameter types (Site 1)
         if (e.callee.n === "Ident" && fnParamOrder.has(e.callee.name)) {
           const params = fnParamOrder.get(e.callee.name)!;
           for (let i = 0; i < e.args.length && i < params.length; i++) {
@@ -1061,10 +1148,10 @@ function typeCheck(items: Item[]): Diag[] {
             }
           }
         }
-        for (const a of e.args) walkExpr(a, ctx, ownScope, depth + 1);
+        for (const a of e.args) walkExpr(a, ctx, ownScope, depth + 1, declaredRet, fnName);
         break;
       case "Method":
-        walkExpr(e.recv, ctx, ownScope, depth + 1);
+        walkExpr(e.recv, ctx, ownScope, depth + 1, declaredRet, fnName);
         {
           // THE GATE: check if the receiver's TYPE provides the required capability.
           //
@@ -1125,23 +1212,57 @@ function typeCheck(items: Item[]): Diag[] {
             }
           }
         }
-        for (const a of e.args) walkExpr(a, ctx, ownScope, depth + 1);
+        // PHASE 8: Check argument types for impl method calls (Site 5)
+        // If the receiver is a known struct with an impl, check argument types
+        // against the method's declared parameter types.
+        {
+          const recvTy = inferType(e.recv, ctx, sft, fnRet, { d: 0, max: 256 });
+          if (recvTy.k === "struct") {
+            const methodKey = `${recvTy.name}::${e.name}`;
+            if (implParamOrder.has(methodKey)) {
+              const params = implParamOrder.get(methodKey)!;
+              for (let i = 0; i < e.args.length && i < params.length; i++) {
+                const argTy = inferType(e.args[i], ctx, sft, fnRet, { d: 0, max: 256 });
+                const paramTy = params[i].ty;
+                if (!typesCompatible(argTy, paramTy)) {
+                  diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: `Type error in call to '${methodKey}': parameter '${params[i].name}' expects ${formatType(paramTy)} but got ${formatType(argTy)}.` });
+                }
+              }
+            }
+          }
+        }
+        for (const a of e.args) walkExpr(a, ctx, ownScope, depth + 1, declaredRet, fnName);
         break;
-      case "Field": walkExpr(e.recv, ctx, ownScope, depth + 1); break;
-      case "Index": walkExpr(e.arr, ctx, ownScope, depth + 1); walkExpr(e.idx, ctx, ownScope, depth + 1); break;
-      case "Array": for (const el of e.elems) walkExpr(el, ctx, ownScope, depth + 1); break;
-      case "MapLit": for (const p of e.pairs) walkExpr(p.val, ctx, ownScope, depth + 1); break;
-      case "If": walkExpr(e.cond, ctx, ownScope, depth + 1); walkStmts(e.then, ctx, ownScope, depth + 1); if (e.els) walkStmts(e.els, ctx, ownScope, depth + 1); break;
-      case "Match": walkExpr(e.scrut, ctx, ownScope, depth + 1); for (const a of e.arms) walkStmts(a.body, new Map(ctx), new Set(ownScope), depth + 1); break;
-      case "Block": walkStmts(e.body, ctx, ownScope, depth + 1); break;
-      case "Try": walkExpr(e.e, ctx, ownScope, depth + 1); break;
-      case "Some": case "Ok": case "Err": walkExpr(e.e, ctx, ownScope, depth + 1); break;
+      case "Field": walkExpr(e.recv, ctx, ownScope, depth + 1, declaredRet, fnName); break;
+      case "Index": walkExpr(e.arr, ctx, ownScope, depth + 1, declaredRet, fnName); walkExpr(e.idx, ctx, ownScope, depth + 1, declaredRet, fnName); break;
+      case "Array": for (const el of e.elems) walkExpr(el, ctx, ownScope, depth + 1, declaredRet, fnName); break;
+      case "MapLit": for (const p of e.pairs) walkExpr(p.val, ctx, ownScope, depth + 1, declaredRet, fnName); break;
+      case "If": walkExpr(e.cond, ctx, ownScope, depth + 1, declaredRet, fnName); walkStmts(e.then, ctx, ownScope, depth + 1, declaredRet, fnName); if (e.els) walkStmts(e.els, ctx, ownScope, depth + 1, declaredRet, fnName); break;
+      case "Match": walkExpr(e.scrut, ctx, ownScope, depth + 1, declaredRet, fnName); for (const a of e.arms) walkStmts(a.body, new Map(ctx), new Set(ownScope), depth + 1, declaredRet, fnName); break;
+      case "Block": walkStmts(e.body, ctx, ownScope, depth + 1, declaredRet, fnName); break;
+      case "Try": walkExpr(e.e, ctx, ownScope, depth + 1, declaredRet, fnName); break;
+      case "Some": case "Ok": case "Err": walkExpr(e.e, ctx, ownScope, depth + 1, declaredRet, fnName); break;
       case "StructLit":
         // Reject forged Module/Env/TaskHandle structs (defense in depth)
         if (e.name === "Module" || e.name === "Env" || e.name === "TaskHandle") {
           diags.push({ kind: "error", phase: "check", line: e.line, col: 0, msg: `Cannot construct a forged '${e.name}' value. Capability modules are only available through the 'env' parameter passed to main.` });
         }
-        for (const f of e.fields) walkExpr(f.val, ctx, ownScope, depth + 1);
+        // PHASE 8: Verify struct field types (Site 3)
+        // For each field in the StructLit, check that the value's type
+        // is compatible with the declared field type from the struct definition.
+        if (sft.has(e.name)) {
+          const declaredFields = sft.get(e.name)!;
+          for (const f of e.fields) {
+            const declaredFTy = declaredFields.get(f.name);
+            if (declaredFTy) {
+              const actualTy = inferType(f.val, ctx, sft, fnRet, { d: 0, max: 256 });
+              if (!typesCompatible(actualTy, declaredFTy)) {
+                diags.push({ kind: "error", phase: "check", line: e.line, col: 0, msg: `Type error in struct construction: field '${f.name}' of struct '${e.name}' expects ${formatType(declaredFTy)} but got ${formatType(actualTy)}.` });
+              }
+            }
+          }
+        }
+        for (const f of e.fields) walkExpr(f.val, ctx, ownScope, depth + 1, declaredRet, fnName);
         break;
       case "Closure": {
         // Closures capture the current ctx (capability flows through capture).
@@ -1152,7 +1273,7 @@ function typeCheck(items: Item[]): Diag[] {
           cCtx.set(p, { k: "other" });
           cOwn.add(p);
         }
-        walkStmts(e.body, cCtx, cOwn, depth + 1);
+        walkStmts(e.body, cCtx, cOwn, depth + 1, declaredRet, fnName);
         break;
       }
       case "StrLit": {
@@ -1162,7 +1283,7 @@ function typeCheck(items: Item[]): Diag[] {
             const { toks } = tokenize(part.expr);
             const pp = new Parser(toks);
             const inner = pp.parseExpr();
-            if (inner) walkExpr(inner, ctx, ownScope, depth + 1);
+            if (inner) walkExpr(inner, ctx, ownScope, depth + 1, declaredRet, fnName);
             for (const d of pp.diags) diags.push(d);
           }
         }
