@@ -9,14 +9,14 @@ import { describe, test, expect } from "bun:test";
 import { run } from "../src/lib/aegis/interpreter";
 
 describe("Regression: 5 canonical programs", () => {
-  test("hello world", () => {
-    const r = run(`fn main() { print("Hello, world!") }`);
+  test("hello world", async () => {
+    const r = await run(`fn main() { print("Hello, world!") }`);
     expect(r.ok).toBe(true);
     expect(r.output).toEqual(["Hello, world!"]);
   });
 
-  test("function with error handling", () => {
-    const r = run(`fn divide(a: Float, b: Float) -> Result<Float, String> {
+  test("function with error handling", async () => {
+    const r = await run(`fn divide(a: Float, b: Float) -> Result<Float, String> {
       if b == 0.0 { return Err("division by zero") }
       Ok(a / b)
     }
@@ -30,8 +30,8 @@ describe("Regression: 5 canonical programs", () => {
     expect(r.output).toEqual(["Result: 5"]);
   });
 
-  test("struct with methods", () => {
-    const r = run(`struct Point { x: Float, y: Float }
+  test("struct with methods", async () => {
+    const r = await run(`struct Point { x: Float, y: Float }
     impl Point {
       fn new(x: Float, y: Float) -> Point { Point { x: x, y: y } }
       fn distance_to(self, other: Point) -> Float {
@@ -49,8 +49,8 @@ describe("Regression: 5 canonical programs", () => {
     expect(r.output[0]).toBe("Distance: 5");
   });
 
-  test("read file + parse untrusted input", () => {
-    const r = run(`fn main(env: Cap) {
+  test("read file + parse untrusted input", async () => {
+    const r = await run(`fn main(env: Cap) {
       let content = env.fs.read("data.json")?
       let n = content.parse_int()
       match n {
@@ -61,8 +61,8 @@ describe("Regression: 5 canonical programs", () => {
     expect(r.ok).toBe(true);
   });
 
-  test("concurrent task with spawn(move, ...)", () => {
-    const r = run(`fn main(env: Cap) {
+  test("concurrent task with spawn(move, ...)", async () => {
+    const r = await run(`fn main(env: Cap) {
       let handle = spawn(move || { env.net.fetch("https://api.example.com")? })
       match handle.join() {
         Ok(text) => print("Got: {text}"),
@@ -74,26 +74,26 @@ describe("Regression: 5 canonical programs", () => {
 });
 
 describe("Regression: interpreter does not crash on malformed input", () => {
-  test("empty program is a no-op (no main, no error)", () => {
-    const r = run(``);
+  test("empty program is a no-op (no main, no error)", async () => {
+    const r = await run(``);
     // An empty program has no items and no main — it does nothing.
     // This is not an error; it's a valid (if useless) program.
     expect(r.ok).toBe(true);
     expect(r.output).toEqual([]);
   });
 
-  test("unbalanced braces", () => {
-    const r = run(`fn main() {`);
+  test("unbalanced braces", async () => {
+    const r = await run(`fn main() {`);
     expect(r.ok).toBe(false);
   });
 
-  test("undefined identifier", () => {
-    const r = run(`fn main() { print(does_not_exist) }`);
+  test("undefined identifier", async () => {
+    const r = await run(`fn main() { print(does_not_exist) }`);
     expect(r.ok).toBe(false);
   });
 
-  test("type mismatch in condition", () => {
-    const r = run(`fn main() { if 5 { print("x") } }`);
+  test("type mismatch in condition", async () => {
+    const r = await run(`fn main() { if 5 { print("x") } }`);
     expect(r.ok).toBe(false);
   });
 });

@@ -10,7 +10,7 @@ export async function POST(req: NextRequest) {
     if (!code.trim()) {
       return NextResponse.json({ ok: false, output: [], diagnostics: [{ kind: "error", phase: "parse", line: 0, col: 0, msg: "Empty program." }] });
     }
-    const result = run(code);
+    const result = await run(code);
     return NextResponse.json(result);
   } catch (e: any) {
     return NextResponse.json({

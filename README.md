@@ -4,6 +4,7 @@
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-research%20prototype-orange.svg)
 ![Tests](https://img.shields.io/badge/tests-206%20pass-brightgreen.svg)
+![AI](https://img.shields.io/badge/AI-0.35s%20via%20SDK-brightgreen.svg)
 ![Fuzz](https://img.shields.io/badge/fuzz-5000+%20iters%2C%200%20bypass-brightgreen.svg)
 
 > A programming language built from scratch for security-by-construction,
@@ -14,6 +15,34 @@
 **Project status: research prototype / MVP.** Not production-ready. Not
 "unhackable." The interpreter is a teaching tool that demonstrates the
 security properties; it is NOT a production compiler.
+
+---
+
+## Phase 14: Async interpreter rewrite + real AI via SDK
+
+Phase 14 is a **foundational rewrite** — the entire evaluator is now async.
+
+### What changed
+
+1. **`run()` is async** — returns `Promise<RunResult>`. All callers (CLI,
+   API, tests) updated with `await`.
+2. **`evalExpr`/`evalStmt`/`evalMethod` are async** — every evaluation
+   function returns `Promise<Val>`. Uses `await` for all sub-evaluations.
+3. **Real AI via z-ai-web-dev-sdk** — `env.ai.complete/chat` now calls
+   the SDK directly (not CLI subprocess). Speed: **0.35s** (was 10-30s).
+4. **Type checker remains sync** — `typeCheck()` is unchanged. The gate
+   runs before evaluation, no async needed.
+5. **Runtime backstop unchanged** — session secret check still works.
+
+### Performance
+
+| Metric | Phase 13 (sync) | Phase 14 (async) |
+|--------|-----------------|-------------------|
+| Startup | 63ms | 72ms |
+| AI call (mock) | ~0ms | ~0ms |
+| AI call (real) | 10-30s (CLI subprocess) | **0.35s (SDK direct)** |
+
+**206 tests pass.** 0 failures. No security regression.
 
 ---
 

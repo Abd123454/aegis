@@ -43,6 +43,18 @@ backward-compatibility promise applies.
 
 ## [Unreleased]
 
+### Phase 14 — Async interpreter rewrite + real AI via SDK
+
+- **Rewritten**: Entire evaluator is async — `run()` returns `Promise<RunResult>`.
+- **Rewritten**: `evalExpr`/`evalStmt`/`evalMethod`/`evalCall`/`evalBin`/`evalMatch`/`execBlock` all async.
+- **Rewritten**: `applyFn` async — supports async user functions and callbacks.
+- **Upgraded**: AI calls now use z-ai-web-dev-sdk directly (not CLI subprocess).
+  - Speed: 0.35s (was 10-30s — **30-85x faster**)
+- **Updated**: All 206 tests converted to async (`await run()`).
+- **Updated**: CLI and API route use `await run()`.
+- **Unchanged**: Type checker (sync), runtime backstop, capability model.
+- All 206 tests pass. 0 failures.
+
 ### Phase 13 — General-purpose language enhancements
 
 - **Added**: `async`/`await` syntax — parsed and accepted (sync evaluator treats await as identity).

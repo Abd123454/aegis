@@ -21,8 +21,8 @@ import { run } from "../src/lib/aegis/interpreter";
 
 describe("Adversarial review — Ambient authority bypasses (A1-A4)", () => {
   // A1: function without Cap parameter references env at runtime
-  test("A1: function without Cap reaches env.fs.read", () => {
-    const r = run(`fn sneaky() { env.fs.read("/etc/passwd") }
+  test("A1: function without Cap reaches env.fs.read", async () => {
+    const r = await run(`fn sneaky() { env.fs.read("/etc/passwd") }
     fn main(env: Cap) { sneaky() }`);
     expect(r.ok).toBe(false);
     // Must be rejected at analysis (capability check) or runtime (undefined env)
@@ -30,36 +30,36 @@ describe("Adversarial review — Ambient authority bypasses (A1-A4)", () => {
   });
 
   // A3: direct fs reference (fs was a global in the old code)
-  test("A3: direct fs.read without env", () => {
-    const r = run(`fn main() { fs.read("/etc/passwd") }`);
+  test("A3: direct fs.read without env", async () => {
+    const r = await run(`fn main() { fs.read("/etc/passwd") }`);
     expect(r.ok).toBe(false);
   });
 
   // A4: env reachable as a global identifier
-  test("A4: env is not a global — referencing it without Cap fails", () => {
-    const r = run(`fn main() { env }`);
+  test("A4: env is not a global — referencing it without Cap fails", async () => {
+    const r = await run(`fn main() { env }`);
     expect(r.ok).toBe(false);
   });
 });
 
 describe("Adversarial review — String interpolation smuggling (I1-I2)", () => {
   // I1: capability call smuggled inside string interpolation
-  test("I1: env.fs.read inside string interpolation", () => {
-    const r = run(`fn sneaky() { let x = "{env.fs.read(\"/etc/passwd\")}" }
+  test("I1: env.fs.read inside string interpolation", async () => {
+    const r = await run(`fn sneaky() { let x = "{env.fs.read(\"/etc/passwd\")}" }
     fn main(env: Cap) { sneaky() }`);
     expect(r.ok).toBe(false);
   });
 
   // I2: shell.run smuggled inside interpolation
-  test("I2: shell.run inside string interpolation without Cap", () => {
-    const r = run(`fn sneaky() { let x = "{shell.run([\"ls\"])}" }
+  test("I2: shell.run inside string interpolation without Cap", async () => {
+    const r = await run(`fn sneaky() { let x = "{shell.run([\"ls\"])}" }
     fn main(env: Cap) { sneaky() }`);
     expect(r.ok).toBe(false);
   });
 
   // S2 variant: db.query template built via interpolation
-  test("S2-variant: db.query template via interpolation", () => {
-    const r = run(`fn main(env: Cap) {
+  test("S2-variant: db.query template via interpolation", async () => {
+    const r = await run(`fn main(env: Cap) {
       let user = "admin"
       env.db.query("SELECT * FROM u WHERE n = {user}", [])
     }`);
@@ -69,8 +69,8 @@ describe("Adversarial review — String interpolation smuggling (I1-I2)", () => 
 
 describe("Adversarial review — Forged Module structs (F1-F3)", () => {
   // F1: forge a Module struct with __mod: "fs"
-  test("F1: forge Module { __mod: \"fs\" } and call read", () => {
-    const r = run(`fn main() {
+  test("F1: forge Module { __mod: \"fs\" } and call read", async () => {
+    const r = await run(`fn main() {
       let fake = Module { __mod: "fs" }
       fake.read("/etc/passwd")
     }`);
@@ -78,8 +78,8 @@ describe("Adversarial review — Forged Module structs (F1-F3)", () => {
   });
 
   // F2: forge a Module with __cap and __mod
-  test("F2: forge Module with __cap and __mod", () => {
-    const r = run(`fn main() {
+  test("F2: forge Module with __cap and __mod", async () => {
+    const r = await run(`fn main() {
       let fake = Module { __cap: 0, __mod: "net" }
       fake.fetch("https://evil.com")
     }`);
@@ -87,8 +87,8 @@ describe("Adversarial review — Forged Module structs (F1-F3)", () => {
   });
 
   // F3: forge an Env struct
-  test("F3: forge Env struct", () => {
-    const r = run(`fn main() {
+  test("F3: forge Env struct", async () => {
+    const r = await run(`fn main() {
       let fakeenv = Env { }
       fakeenv.fs.read("/etc/passwd")
     }`);
@@ -98,8 +98,8 @@ describe("Adversarial review — Forged Module structs (F1-F3)", () => {
 
 describe("Adversarial review — SQL injection via concatenation (S1, S2)", () => {
   // S1: db.query with concatenated template (2 args, but template is Bin)
-  test("S1: db.query with concatenated template", () => {
-    const r = run(`fn main(env: Cap) {
+  test("S1: db.query with concatenated template", async () => {
+    const r = await run(`fn main(env: Cap) {
       let user = "admin'; DROP TABLE users; --"
       env.db.query("SELECT * FROM users WHERE name = '" + user + "'", [])
     }`);
@@ -108,8 +108,8 @@ describe("Adversarial review — SQL injection via concatenation (S1, S2)", () =
   });
 
   // S2: db.query with interpolation in template
-  test("S2: db.query with interpolated template", () => {
-    const r = run(`fn main(env: Cap) {
+  test("S2: db.query with interpolated template", async () => {
+    const r = await run(`fn main(env: Cap) {
       let user = "admin"
       env.db.query("SELECT * FROM u WHERE n = {user}", [])
     }`);
@@ -119,8 +119,8 @@ describe("Adversarial review — SQL injection via concatenation (S1, S2)", () =
 
 describe("Adversarial review — Command injection via argv (S3)", () => {
   // S3: shell.run with variable in argv array
-  test("S3: shell.run with variable in argv", () => {
-    const r = run(`fn main(env: Cap) {
+  test("S3: shell.run with variable in argv", async () => {
+    const r = await run(`fn main(env: Cap) {
       let filename = "foo.txt; rm -rf /"
       env.shell.run(["cat", filename])
     }`);
@@ -129,8 +129,8 @@ describe("Adversarial review — Command injection via argv (S3)", () => {
   });
 
   // S3-variant: shell.run with expression in argv
-  test("S3-variant: shell.run with expression in argv", () => {
-    const r = run(`fn main(env: Cap) {
+  test("S3-variant: shell.run with expression in argv", async () => {
+    const r = await run(`fn main(env: Cap) {
       env.shell.run(["ls", "x" + "y"])
     }`);
     expect(r.ok).toBe(false);
@@ -139,8 +139,8 @@ describe("Adversarial review — Command injection via argv (S3)", () => {
 
 describe("Adversarial review — Integer overflow on all operators (O1-O5)", () => {
   // O1: subtraction underflow
-  test("O1: subtraction underflow (-2147483648 - 1)", () => {
-    const r = run(`fn main() {
+  test("O1: subtraction underflow (-2147483648 - 1)", async () => {
+    const r = await run(`fn main() {
       let a = -2147483648
       let b = 1
       let res = a - b
@@ -154,8 +154,8 @@ describe("Adversarial review — Integer overflow on all operators (O1-O5)", () 
   });
 
   // O3: multiplication overflow
-  test("O3: multiplication overflow (100000 * 100000)", () => {
-    const r = run(`fn main() {
+  test("O3: multiplication overflow (100000 * 100000)", async () => {
+    const r = await run(`fn main() {
       let a = 100000
       let b = 100000
       let res = a * b
@@ -169,8 +169,8 @@ describe("Adversarial review — Integer overflow on all operators (O1-O5)", () 
   });
 
   // O5: unary negation of INT_MIN
-  test("O5: unary negation of INT_MIN", () => {
-    const r = run(`fn main() {
+  test("O5: unary negation of INT_MIN", async () => {
+    const r = await run(`fn main() {
       let a = -2147483648
       let res = -a
       match res {
@@ -183,15 +183,15 @@ describe("Adversarial review — Integer overflow on all operators (O1-O5)", () 
   });
 
   // O-variant: oversized integer literal
-  test("O-variant: oversized integer literal rejected at parse", () => {
-    const r = run(`fn main() { let x = 9999999999 }`);
+  test("O-variant: oversized integer literal rejected at parse", async () => {
+    const r = await run(`fn main() { let x = 9999999999 }`);
     expect(r.ok).toBe(false);
     expect(r.diagnostics.some((d) => /32-bit|exceeds/i.test(d.msg))).toBe(true);
   });
 
   // O-variant: addition overflow (original, still works)
-  test("O-original: addition overflow (2000000000 + 2000000000)", () => {
-    const r = run(`fn main() {
+  test("O-original: addition overflow (2000000000 + 2000000000)", async () => {
+    const r = await run(`fn main() {
       let big = 2000000000
       let sum = big + big
       match sum {
@@ -206,27 +206,27 @@ describe("Adversarial review — Integer overflow on all operators (O1-O5)", () 
 
 describe("Adversarial review — static mut tokenizer bypass (D1)", () => {
   // D1: static\nmut with newline between
-  test("D1: static<newline>mut bypass attempt", () => {
-    const r = run(`static\nmut counter = 0\nfn main() { print(counter) }`);
+  test("D1: static<newline>mut bypass attempt", async () => {
+    const r = await run(`static\nmut counter = 0\nfn main() { print(counter) }`);
     expect(r.ok).toBe(false);
     expect(r.diagnostics.some((d) => /static mut/i.test(d.msg))).toBe(true);
   });
 
   // D1-variant: static with multiple newlines
-  test("D1-variant: static<newlines>mut", () => {
-    const r = run(`static\n\n\nmut x = 0\nfn main() { print(x) }`);
+  test("D1-variant: static<newlines>mut", async () => {
+    const r = await run(`static\n\n\nmut x = 0\nfn main() { print(x) }`);
     expect(r.ok).toBe(false);
   });
 });
 
 describe("Adversarial review — Deep nesting causing RangeError (L12)", () => {
   // L12: deeply nested parentheses
-  test("L12: deeply nested expressions produce clean error", () => {
+  test("L12: deeply nested expressions produce clean error", async () => {
     let nest = "";
     for (let i = 0; i < 500; i++) nest += "(";
     nest += "1";
     for (let i = 0; i < 500; i++) nest += ")";
-    const r = run(`fn main() { let x = ${nest} }`);
+    const r = await run(`fn main() { let x = ${nest} }`);
     expect(r.ok).toBe(false);
     // Must be a clean parse error, NOT an uncaught RangeError
     expect(r.diagnostics.some((d) => /depth|nesting|stack/i.test(d.msg))).toBe(true);
@@ -235,8 +235,8 @@ describe("Adversarial review — Deep nesting causing RangeError (L12)", () => {
 
 describe("Adversarial review — Closure mutation (C1-C2)", () => {
   // C1: closure mutates captured variable (should be rejected, not silently no-op)
-  test("C1: closure mutation of captured variable is rejected", () => {
-    const r = run(`fn main() {
+  test("C1: closure mutation of captured variable is rejected", async () => {
+    const r = await run(`fn main() {
       let mut x = 0
       let f = || { x = x + 1 }
       f()
@@ -247,8 +247,8 @@ describe("Adversarial review — Closure mutation (C1-C2)", () => {
   });
 
   // C2: closure mutation via for-in variable
-  test("C2: closure mutation via lambda that assigns outer var", () => {
-    const r = run(`fn main() {
+  test("C2: closure mutation via lambda that assigns outer var", async () => {
+    const r = await run(`fn main() {
       let total = 0
       let add = |n| { total = total + n }
       [1, 2, 3].map(add)
@@ -262,8 +262,8 @@ describe("Adversarial review — Cap<fs> type parsing (T1)", () => {
   // T1: Cap<fs> should be recognized as a capability type.
   // With Cap<fs>, the parameter IS the fs capability directly — you call
   // env.read(...), NOT env.fs.read(...) (that's for bare Cap which has .fs field).
-  test("T1: Cap<fs> parameter grants capability for direct read()", () => {
-    const r = run(`fn main(env: Cap<fs>) {
+  test("T1: Cap<fs> parameter grants capability for direct read()", async () => {
+    const r = await run(`fn main(env: Cap<fs>) {
       let content = env.read("test.txt")?
       print(content)
     }`);

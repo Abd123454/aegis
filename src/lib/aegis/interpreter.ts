@@ -1478,718 +1478,150 @@ function valEq(a: Val, b: Val): boolean {
     default: return false;
   }
 }
-
-export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell", "db", "ai", "env"]): RunResult {
+export async function run(source: string, _grantCaps: string[] = ["fs", "net", "shell", "db", "ai", "env"]): Promise<RunResult> {
   const output: string[] = [];
   const diagnostics: Diag[] = [];
   const { toks, diags: lexDiags } = tokenize(source);
   diagnostics.push(...lexDiags);
   if (diagnostics.some((d) => d.kind === "error" && d.phase === "parse"))
     return { ok: false, output, diagnostics };
-
   const p = new Parser(toks);
   const items = p.parseProgram();
   diagnostics.push(...p.diags);
   if (diagnostics.some((d) => d.kind === "error" && d.phase === "parse"))
     return { ok: false, output, diagnostics };
-
   const checkDiags = typeCheck(items);
   diagnostics.push(...checkDiags);
   if (diagnostics.some((d) => d.kind === "error" && d.phase === "check"))
     return { ok: false, output, diagnostics };
-
   const globals: Env = new Map();
   const structDefs = new Map<string, { name: string; fields: { name: string; ty: string }[] }>();
   const impls = new Map<string, Map<string, any>>();
-  // RUNTIME BACKSTOP: Each Module's __cap carries a session-specific token
-  // (moduleName:sessionSecret). User code cannot forge this because:
-  // 1. There is no `cap` literal in the language — user code can't create { k: "cap" } values.
-  // 2. Even if they extract env.fs.__cap and put it in a forged Module{__mod:"net"},
-  //    the label "fs:secret" won't match "net:secret" — the runtime check rejects it.
-  // This means even an analyzer miss fails closed: forged or mistagged modules
-  // are rejected at runtime.
   const sessionSecret = Math.random().toString(36).slice(2) + Date.now().toString(36);
   const makeCap = (modName: string): Val => ({ k: "cap", label: modName + ":" + sessionSecret });
   const makeModule = (name: string): Val => ({ k: "struct", name: "Module", fields: { __cap: makeCap(name), __mod: { k: "str", v: name } } });
-  // CRITICAL FIX: `env` is NOT a global. It exists ONLY in main's local scope
-  // when main declares a Cap parameter. This means a function that does not
-  // receive `env` as a parameter cannot reach `fs`/`net`/`shell`/`db` at all.
   const envObj: Val = { k: "struct", name: "Env", fields: { fs: makeModule("fs"), net: makeModule("net"), shell: makeModule("shell"), db: makeModule("db"), ai: makeModule("ai"), __cap: makeCap("env") } };
   globals.set("print", { k: "fn", name: "print", params: [], body: [], closure: new Map(), caps: false });
   globals.set("sqrt", { k: "fn", name: "sqrt", params: ["x"], body: [], closure: new Map(), caps: false });
   globals.set("len", { k: "fn", name: "len", params: ["x"], body: [], closure: new Map(), caps: false });
-  // Phase 12: stdlib functions
   globals.set("int_to_str", { k: "fn", name: "int_to_str", params: ["x"], body: [], closure: new Map(), caps: false });
   globals.set("str_to_int", { k: "fn", name: "str_to_int", params: ["x"], body: [], closure: new Map(), caps: false });
   globals.set("float_to_str", { k: "fn", name: "float_to_str", params: ["x"], body: [], closure: new Map(), caps: false });
   globals.set("range", { k: "fn", name: "range", params: ["n"], body: [], closure: new Map(), caps: false });
   globals.set("now", { k: "fn", name: "now", params: [], body: [], closure: new Map(), caps: false });
   globals.set("type_of", { k: "fn", name: "type_of", params: ["x"], body: [], closure: new Map(), caps: false });
-  // Phase 12 extended: JSON + crypto stdlib
   globals.set("json_encode", { k: "fn", name: "json_encode", params: ["x"], body: [], closure: new Map(), caps: false });
   globals.set("json_decode", { k: "fn", name: "json_decode", params: ["s"], body: [], closure: new Map(), caps: false });
   globals.set("sha256", { k: "fn", name: "sha256", params: ["s"], body: [], closure: new Map(), caps: false });
   globals.set("random_hex", { k: "fn", name: "random_hex", params: ["n"], body: [], closure: new Map(), caps: false });
-
   for (const it of items) {
     if (it.n === "Fn") globals.set(it.name, { k: "fn", name: it.name, params: it.params.map((p) => p.name), body: it.body, closure: globals, caps: it.hasCap });
     else if (it.n === "Struct") structDefs.set(it.name, it);
-    else if (it.n === "Impl") {
-      if (!impls.has(it.name)) impls.set(it.name, new Map());
-      const m = impls.get(it.name)!;
-      for (const meth of it.methods) m.set(meth.name, meth);
-    }
+    else if (it.n === "Impl") { if (!impls.has(it.name)) impls.set(it.name, new Map()); for (const meth of it.methods) impls.get(it.name)!.set(meth.name, meth); }
   }
-
-  // Helper: call a fn value with positional args (used by map/filter/reduce)
-  const applyFn = (fnVal: Val, args: Val[]): Val => {
+  const applyFn = async (fnVal: Val, args: Val[]): Promise<Val> => {
     if (fnVal.k !== "fn") throw new EvalErr("Expected a function.", 0, 0);
     if (fnVal.name === "sqrt") return { k: "float", v: Math.sqrt((args[0] as any).v) };
-    if (fnVal.name === "len") {
-      const a = args[0];
-      if (a.k === "str" || a.k === "array") return { k: "int", v: a.v.length };
-      if (a.k === "map") return { k: "int", v: a.v.size };
-      throw new EvalErr("len() expects str/array/map.", 0, 0);
-    }
-    // Phase 12: stdlib functions
+    if (fnVal.name === "len") { const a = args[0]; if (a.k === "str" || a.k === "array") return { k: "int", v: a.v.length }; if (a.k === "map") return { k: "int", v: a.v.size }; throw new EvalErr("len() expects str/array/map.", 0, 0); }
     if (fnVal.name === "int_to_str") return { k: "str", v: String((args[0] as any).v) };
-    if (fnVal.name === "str_to_int") {
-      const n = parseInt((args[0] as any).v, 10);
-      return isNaN(n) ? { k: "err", v: { k: "str", v: "not a valid integer" } } : { k: "int", v: n };
-    }
+    if (fnVal.name === "str_to_int") { const n = parseInt((args[0] as any).v, 10); return isNaN(n) ? { k: "err", v: { k: "str", v: "not a valid integer" } } : { k: "int", v: n }; }
     if (fnVal.name === "float_to_str") return { k: "str", v: String((args[0] as any).v) };
-    if (fnVal.name === "range") {
-      const n = (args[0] as any).v;
-      const arr: Val[] = [];
-      for (let i = 0; i < n; i++) arr.push({ k: "int", v: i });
-      return { k: "array", v: arr };
-    }
+    if (fnVal.name === "range") { const n = (args[0] as any).v; const arr: Val[] = []; for (let i = 0; i < n; i++) arr.push({ k: "int", v: i }); return { k: "array", v: arr }; }
     if (fnVal.name === "now") return { k: "int", v: Math.floor(Date.now() / 1000) };
-    if (fnVal.name === "type_of") {
-      const a = args[0];
-      const typeNames: Record<string, string> = {
-        int: "Int", float: "Float", str: "String", bool: "Bool",
-        array: "Array", map: "Map", unit: "Unit", some: "Option",
-        none: "Option", ok: "Result", err: "Result", struct: "Struct", fn: "Fn", cap: "Cap",
-      };
-      return { k: "str", v: typeNames[a.k] || a.k };
-    }
-    // Phase 12 extended: JSON + crypto
-    if (fnVal.name === "json_encode") {
-      const a = args[0];
-      return { k: "ok", v: { k: "str", v: JSON.stringify(valToJSON(a)) } };
-    }
-    if (fnVal.name === "json_decode") {
-      try {
-        const s = (args[0] as any).v as string;
-        const parsed = JSON.parse(s);
-        return { k: "ok", v: jsonToVal(parsed) };
-      } catch {
-        return { k: "err", v: { k: "str", v: "invalid JSON" } };
-      }
-    }
-    if (fnVal.name === "sha256") {
-      const s = (args[0] as any).v as string;
-      // Simple hash (not crypto-grade, but sufficient for demo)
-      let hash = 0;
-      for (let i = 0; i < s.length; i++) {
-        hash = ((hash << 5) - hash) + s.charCodeAt(i);
-        hash |= 0;
-      }
-      return { k: "str", v: Math.abs(hash).toString(16).padStart(8, "0") };
-    }
-    if (fnVal.name === "random_hex") {
-      const n = (args[0] as any).v as number;
-      let hex = "";
-      for (let i = 0; i < n; i++) {
-        hex += Math.floor(Math.random() * 16).toString(16);
-      }
-      return { k: "str", v: hex };
-    }
+    if (fnVal.name === "type_of") { const a = args[0]; const tn: Record<string,string> = {int:"Int",float:"Float",str:"String",bool:"Bool",array:"Array",map:"Map",unit:"Unit",some:"Option",none:"Option",ok:"Result",err:"Result",struct:"Struct",fn:"Fn",cap:"Cap"}; return { k: "str", v: tn[a.k] || a.k }; }
+    if (fnVal.name === "json_encode") return { k: "ok", v: { k: "str", v: JSON.stringify(valToJSON(args[0])) } };
+    if (fnVal.name === "json_decode") { try { return { k: "ok", v: jsonToVal(JSON.parse((args[0] as any).v)) }; } catch { return { k: "err", v: { k: "str", v: "invalid JSON" } }; } }
+    if (fnVal.name === "sha256") { const s = (args[0] as any).v as string; let h = 0; for (let i = 0; i < s.length; i++) { h = ((h<<5)-h)+s.charCodeAt(i); h|=0; } return { k: "str", v: Math.abs(h).toString(16).padStart(8,"0") }; }
+    if (fnVal.name === "random_hex") { const n = (args[0] as any).v as number; let hex = ""; for (let i = 0; i < n; i++) hex += Math.floor(Math.random()*16).toString(16); return { k: "str", v: hex }; }
     const local: Env = new Map(fnVal.closure);
     for (let i = 0; i < fnVal.params.length; i++) local.set(fnVal.params[i], args[i]);
-    try { return execBlock(fnVal.body, local); }
-    catch (sig) {
-      if (sig instanceof ReturnSignal) return sig.val;
-      // ? operator: function returns the Err/None value instead of throwing
-      if (sig instanceof TrySignal) return sig.val;
-      throw sig;
-    }
+    try { return await execBlock(fnVal.body, local); } catch (sig) { if (sig instanceof ReturnSignal) return sig.val; if (sig instanceof TrySignal) return sig.val; throw sig; }
   };
-
-  let evalDepth = 0;
-  const MAX_EVAL_DEPTH = 512;
-  const evalExpr = (e: Expr, env: Env): Val => {
-    evalDepth++;
-    if (evalDepth > MAX_EVAL_DEPTH) {
-      evalDepth--;
-      throw new EvalErr(`Maximum evaluation depth (${MAX_EVAL_DEPTH}) exceeded. Possible infinite recursion or deeply nested expression.`, 0, 0);
-    }
-    try {
-      return evalExprInner(e, env);
-    } finally {
-      evalDepth--;
-    }
-  };
-  const evalExprInner = (e: Expr, env: Env): Val => {
+  let evalDepth = 0; const MAX_EVAL_DEPTH = 512;
+  const evalExpr = async (e: Expr, env: Env): Promise<Val> => { evalDepth++; if (evalDepth > MAX_EVAL_DEPTH) { evalDepth--; throw new EvalErr(`Maximum evaluation depth (${MAX_EVAL_DEPTH}) exceeded.`, 0, 0); } try { return await evalExprInner(e, env); } finally { evalDepth--; } };
+  const parseInnerExpr = (src: string): Expr => { const { toks } = tokenize(src); const pp = new Parser(toks); return pp.parseExpr() || { n: "Unit" }; };
+  const INT_MIN = -2147483648, INT_MAX = 2147483647;
+  function checkedAdd(a: number, b: number): Val { const r = a + b; if (r > INT_MAX || r < INT_MIN) return { k: "err", v: { k: "str", v: "integer overflow on '+'" } }; return { k: "int", v: r }; }
+  function checkedSub(a: number, b: number): Val { const r = a - b; if (r > INT_MAX || r < INT_MIN) return { k: "err", v: { k: "str", v: "integer underflow on '-'" } }; return { k: "int", v: r }; }
+  function checkedMul(a: number, b: number): Val { const r = a * b; if (r > INT_MAX || r < INT_MIN) return { k: "err", v: { k: "str", v: "integer overflow on '*'" } }; return { k: "int", v: r }; }
+  function checkedNeg(a: number): Val { if (a === INT_MIN) return { k: "err", v: { k: "str", v: "integer overflow on unary '-'" } }; return { k: "int", v: -a }; }
+  async function evalExprInner(e: Expr, env: Env): Promise<Val> {
     switch (e.n) {
-      case "IntLit": return { k: "int", v: e.v };
-      case "FloatLit": return { k: "float", v: e.v };
-      case "BoolLit": return { k: "bool", v: e.v };
-      case "StrLit": {
-        // Assembly order: each part contributes (literal, then interpolated expr),
-        // and e.lit holds the FINAL trailing literal (may be "").
-        let s = "";
-        for (const part of e.parts) {
-          s += part.lit;
-          if (part.expr) { const v = evalExpr(parseInnerExpr(part.expr), env); s += valToStr(v); }
-        }
-        s += e.lit;
-        return { k: "str", v: s };
-      }
-      case "None": return { k: "none" };
-      case "Some": return { k: "some", v: evalExpr(e.e, env) };
-      case "Ok": return { k: "ok", v: evalExpr(e.e, env) };
-      case "Err": return { k: "err", v: evalExpr(e.e, env) };
-      case "Unit": return { k: "unit" };
-      case "Ident": {
-        if (env.has(e.name)) return env.get(e.name)!;
-        if (globals.has(e.name)) return globals.get(e.name)!;
-        throw new EvalErr(`Undefined identifier '${e.name}'.`, e.line, e.col);
-      }
-      case "Array": return { k: "array", v: e.elems.map((el) => evalExpr(el, env)) };
-      case "MapLit": {
-        const m = new Map<string, Val>();
-        for (const p of e.pairs) m.set(p.key, evalExpr(p.val, env));
-        return { k: "map", v: m };
-      }
-      case "Index": {
-        const arr = evalExpr(e.arr, env);
-        const idx = evalExpr(e.idx, env);
-        if (arr.k === "array") {
-          if (idx.k !== "int") throw new EvalErr("Array index must be Int.", e.line, e.col);
-          if (idx.v < 0 || idx.v >= arr.v.length) return { k: "none" };
-          return { k: "some", v: arr.v[idx.v] };
-        }
-        if (arr.k === "map") {
-          if (idx.k !== "str") throw new EvalErr("Map index must be String.", e.line, e.col);
-          if (!arr.v.has(idx.v)) return { k: "none" };
-          return { k: "some", v: arr.v.get(idx.v)! };
-        }
-        throw new EvalErr("Indexing a non-indexable value.", e.line, e.col);
-      }
+      case "IntLit": return { k: "int", v: e.v }; case "FloatLit": return { k: "float", v: e.v }; case "BoolLit": return { k: "bool", v: e.v };
+      case "StrLit": { let s = ""; for (const part of e.parts) { s += part.lit; if (part.expr) { const v = await evalExpr(parseInnerExpr(part.expr), env); s += valToStr(v); } } s += e.lit; return { k: "str", v: s }; }
+      case "None": return { k: "none" }; case "Some": return { k: "some", v: await evalExpr(e.e, env) }; case "Ok": return { k: "ok", v: await evalExpr(e.e, env) }; case "Err": return { k: "err", v: await evalExpr(e.e, env) }; case "Unit": return { k: "unit" };
+      case "Ident": { if (env.has(e.name)) return env.get(e.name)!; if (globals.has(e.name)) return globals.get(e.name)!; throw new EvalErr(`Undefined identifier '${e.name}'.`, e.line, e.col); }
+      case "Array": return { k: "array", v: await Promise.all(e.elems.map((el) => evalExpr(el, env))) };
+      case "MapLit": { const m = new Map<string, Val>(); for (const p of e.pairs) m.set(p.key, await evalExpr(p.val, env)); return { k: "map", v: m }; }
+      case "Index": { const arr = await evalExpr(e.arr, env); const idx = await evalExpr(e.idx, env); if (arr.k === "array") { if (idx.k !== "int") throw new EvalErr("Array index must be Int.", e.line, e.col); if (idx.v < 0 || idx.v >= arr.v.length) return { k: "none" }; return { k: "some", v: arr.v[idx.v] }; } if (arr.k === "map") { if (idx.k !== "str") throw new EvalErr("Map index must be String.", e.line, e.col); if (!arr.v.has(idx.v)) return { k: "none" }; return { k: "some", v: arr.v.get(idx.v)! }; } throw new EvalErr("Indexing a non-indexable value.", e.line, e.col); }
       case "Bin": return evalBin(e, env);
-      case "Unary": {
-        const v = evalExpr(e.e, env);
-        if (e.op === "-" && v.k === "int") return checkedNeg(v.v);
-        if (e.op === "-" && v.k === "float") return { k: "float", v: -v.v };
-        if (e.op === "!" && v.k === "bool") return { k: "bool", v: !v.v };
-        throw new EvalErr(`Bad unary '${e.op}'.`, 0, 0);
-      }
-      case "If": {
-        const c = evalExpr(e.cond, env);
-        if (c.k !== "bool") throw new EvalErr("`if` condition must be Bool.", 0, 0);
-        if (c.v) return execBlock(e.then, env);
-        if (e.els) return execBlock(e.els, env);
-        return { k: "unit" };
-      }
+      case "Unary": { const v = await evalExpr(e.e, env); if (e.op === "-" && v.k === "int") return checkedNeg(v.v); if (e.op === "-" && v.k === "float") return { k: "float", v: -v.v }; if (e.op === "!" && v.k === "bool") return { k: "bool", v: !v.v }; throw new EvalErr(`Bad unary '${e.op}'.`, 0, 0); }
+      case "If": { const c = await evalExpr(e.cond, env); if (c.k !== "bool") throw new EvalErr("`if` condition must be Bool.", 0, 0); if (c.v) return await execBlock(e.then, env); if (e.els) return await execBlock(e.els, env); return { k: "unit" }; }
       case "Match": return evalMatch(e, env);
-      case "Block": return execBlock(e.body, env);
-      case "Try": {
-        const v = evalExpr(e.e, env);
-        // `?` unwraps Ok(x) -> x and Some(x) -> x; propagates Err/None.
-        if (v.k === "err" || v.k === "none") throw new TrySignal(v);
-        if (v.k === "ok") return v.v;   // unwrap Ok
-        if (v.k === "some") return v.v; // unwrap Some
-        return v;
-      }
-      case "Field": { const recv = evalExpr(e.recv, env); if (recv.k === "struct" && e.name in recv.fields) return recv.fields[e.name]; throw new EvalErr(`No field '${e.name}'.`, 0, 0); }
+      case "Block": return await execBlock(e.body, env);
+      case "Try": { const v = await evalExpr(e.e, env); if (v.k === "err" || v.k === "none") throw new TrySignal(v); if (v.k === "ok") return v.v; if (v.k === "some") return v.v; return v; }
+      case "Field": { const recv = await evalExpr(e.recv, env); if (recv.k === "struct" && e.name in recv.fields) return recv.fields[e.name]; throw new EvalErr(`No field '${e.name}'.`, 0, 0); }
       case "Call": return evalCall(e, env);
       case "Method": return evalMethod(e, env);
-      case "StructLit": {
-        const fields: Record<string, Val> = {};
-        for (const f of e.fields) fields[f.name] = evalExpr(f.val, env);
-        return { k: "struct", name: e.name, fields };
-      }
+      case "StructLit": { const fields: Record<string, Val> = {}; for (const f of e.fields) fields[f.name] = await evalExpr(f.val, env); return { k: "struct", name: e.name, fields }; }
       case "Closure": return { k: "fn", name: "<closure>", params: e.params, body: e.body, closure: env, caps: false };
       default: throw new EvalErr(`Cannot evaluate node ${(e as any).n}.`, 0, 0);
     }
-  };
-
-  const parseInnerExpr = (src: string): Expr => {
-    const { toks } = tokenize(src);
-    const pp = new Parser(toks);
-    return pp.parseExpr() || { n: "Unit" };
-  };
-
-  // Checked integer arithmetic: returns Err on overflow/underflow.
-  // INT_MIN = -2147483648, INT_MAX = 2147483647 (32-bit signed range).
-  const INT_MIN = -2147483648;
-  const INT_MAX = 2147483647;
-  function checkedAdd(a: number, b: number): Val {
-    const res = a + b;
-    if (res > INT_MAX || res < INT_MIN) return { k: "err", v: { k: "str", v: "integer overflow on '+' (use wrapping_add for opt-in wraparound)" } };
-    return { k: "int", v: res };
   }
-  function checkedSub(a: number, b: number): Val {
-    const res = a - b;
-    if (res > INT_MAX || res < INT_MIN) return { k: "err", v: { k: "str", v: "integer underflow on '-' (use wrapping_sub for opt-in wraparound)" } };
-    return { k: "int", v: res };
-  }
-  function checkedMul(a: number, b: number): Val {
-    const res = a * b;
-    if (res > INT_MAX || res < INT_MIN) return { k: "err", v: { k: "str", v: "integer overflow on '*' (use wrapping_mul for opt-in wraparound)" } };
-    return { k: "int", v: res };
-  }
-  function checkedNeg(a: number): Val {
-    // Negating INT_MIN overflows: -(-2147483648) = 2147483648 > INT_MAX
-    if (a === INT_MIN) return { k: "err", v: { k: "str", v: "integer overflow on unary '-' (negating INT_MIN)" } };
-    return { k: "int", v: -a };
-  }
-
-  function evalBin(e: Extract<Expr, { n: "Bin" }>, env: Env): Val {
-    if (e.op === "&&") { const l = evalExpr(e.l, env); if (l.k === "bool" && !l.v) return { k: "bool", v: false }; const r = evalExpr(e.r, env); return { k: "bool", v: (l as any).v && (r as any).v }; }
-    if (e.op === "||") { const l = evalExpr(e.l, env); if (l.k === "bool" && l.v) return { k: "bool", v: true }; const r = evalExpr(e.r, env); return { k: "bool", v: (l as any).v || (r as any).v }; }
-    const l = evalExpr(e.l, env); const r = evalExpr(e.r, env);
-    const li = l.k === "int" || l.k === "float" ? l.v : null;
-    const ri = r.k === "int" || r.k === "float" ? r.v : null;
-    if (li !== null && ri !== null) {
-      const isFloat = l.k === "float" || r.k === "float";
-      switch (e.op) {
-        case "+": {
-          if (isFloat) return { k: "float", v: li + ri };
-          return checkedAdd(li, ri);
-        }
-        case "-": {
-          if (isFloat) return { k: "float", v: li - ri };
-          return checkedSub(li, ri);
-        }
-        case "*": {
-          if (isFloat) return { k: "float", v: li * ri };
-          return checkedMul(li, ri);
-        }
-        case "/": {
-          if (ri === 0) return { k: "err", v: { k: "str", v: "division by zero" } };
-          if (isFloat) return { k: "float", v: li / ri };
-          // INT_MIN / -1 = INT_MAX + 1 which overflows
-          if (li === INT_MIN && ri === -1) return { k: "err", v: { k: "str", v: "integer overflow on '/' (INT_MIN / -1)" } };
-          return { k: "int", v: Math.trunc(li / ri) };
-        }
-        case "%": {
-          if (ri === 0) return { k: "err", v: { k: "str", v: "modulo by zero" } };
-          // INT_MIN % -1 = 0 in math, but check for safety
-          if (li === INT_MIN && ri === -1) return { k: "int", v: 0 };
-          return { k: "int", v: li % ri };
-        }
-      }
-    }
+  async function evalBin(e: Extract<Expr, { n: "Bin" }>, env: Env): Promise<Val> {
+    if (e.op === "&&") { const l = await evalExpr(e.l, env); if (l.k === "bool" && !l.v) return { k: "bool", v: false }; const r = await evalExpr(e.r, env); return { k: "bool", v: (l as any).v && (r as any).v }; }
+    if (e.op === "||") { const l = await evalExpr(e.l, env); if (l.k === "bool" && l.v) return { k: "bool", v: true }; const r = await evalExpr(e.r, env); return { k: "bool", v: (l as any).v || (r as any).v }; }
+    const l = await evalExpr(e.l, env); const r = await evalExpr(e.r, env);
+    const li = l.k === "int" || l.k === "float" ? l.v : null; const ri = r.k === "int" || r.k === "float" ? r.v : null;
+    if (li !== null && ri !== null) { const isFloat = l.k === "float" || r.k === "float";
+      switch (e.op) { case "+": return isFloat ? { k: "float", v: li + ri } : checkedAdd(li, ri); case "-": return isFloat ? { k: "float", v: li - ri } : checkedSub(li, ri); case "*": return isFloat ? { k: "float", v: li * ri } : checkedMul(li, ri);
+        case "/": { if (ri === 0) return { k: "err", v: { k: "str", v: "division by zero" } }; if (isFloat) return { k: "float", v: li / ri }; if (li === INT_MIN && ri === -1) return { k: "err", v: { k: "str", v: "integer overflow on '/'" } }; return { k: "int", v: Math.trunc(li / ri) }; }
+        case "%": { if (ri === 0) return { k: "err", v: { k: "str", v: "modulo by zero" } }; if (li === INT_MIN && ri === -1) return { k: "int", v: 0 }; return { k: "int", v: li % ri }; } } }
     if (l.k === "str" && e.op === "+") return { k: "str", v: l.v + (r.k === "str" ? r.v : valToStr(r)) };
-    if (e.op === "==") return { k: "bool", v: valEq(l, r) };
-    if (e.op === "!=") return { k: "bool", v: !valEq(l, r) };
-    if (li !== null && ri !== null) {
-      if (e.op === "<") return { k: "bool", v: li < ri };
-      if (e.op === ">") return { k: "bool", v: li > ri };
-      if (e.op === "<=") return { k: "bool", v: li <= ri };
-      if (e.op === ">=") return { k: "bool", v: li >= ri };
-    }
+    if (e.op === "==") return { k: "bool", v: valEq(l, r) }; if (e.op === "!=") return { k: "bool", v: !valEq(l, r) };
+    if (li !== null && ri !== null) { if (e.op === "<") return { k: "bool", v: li < ri }; if (e.op === ">") return { k: "bool", v: li > ri }; if (e.op === "<=") return { k: "bool", v: li <= ri }; if (e.op === ">=") return { k: "bool", v: li >= ri }; }
     throw new EvalErr(`Bad binary op '${e.op}' on ${l.k}/${r.k}.`, 0, 0);
   }
-
-  function evalMatch(e: Extract<Expr, { n: "Match" }>, env: Env): Val {
-    const v = evalExpr(e.scrut, env);
-    for (const arm of e.arms) {
-      const m = matchPat(arm.pat, v);
-      if (m !== null) {
-        const local = new Map(env);
-        for (const b of arm.binds) local.set(b, m);
-        return execBlock(arm.body, local);
-      }
-    }
-    throw new EvalErr("Non-exhaustive match — no arm matched. Aegis requires exhaustive pattern matching.", 0, 0);
+  async function evalMatch(e: Extract<Expr, { n: "Match" }>, env: Env): Promise<Val> { const v = await evalExpr(e.scrut, env); for (const arm of e.arms) { const m = matchPat(arm.pat, v); if (m !== null) { const local = new Map(env); for (const b of arm.binds) local.set(b, m); return await execBlock(arm.body, local); } } throw new EvalErr("Non-exhaustive match.", 0, 0); }
+  function matchPat(pat: string, v: Val): Val | null { if (pat === "_") return { k: "unit" }; if (pat === "None" && v.k === "none") return { k: "unit" }; if (pat === "Some" && v.k === "some") return v.v; if (pat === "Ok" && v.k === "ok") return v.v; if (pat === "Err" && v.k === "err") return v.v; const m = pat.match(/^(\w+)\((\w+)\)$/); if (m) { if (m[1] === "Some" && v.k === "some") return v.v; if (m[1] === "Ok" && v.k === "ok") return v.v; if (m[1] === "Err" && v.k === "err") return v.v; } if (/^-?\d+$/.test(pat) && v.k === "int" && v.v === parseInt(pat, 10)) return { k: "unit" }; if (pat.startsWith('"') && v.k === "str" && v.v === pat.slice(1, -1)) return { k: "unit" }; if (v.k === "bool" && (pat === "true" || pat === "false") && v.v === (pat === "true")) return { k: "unit" }; return null; }
+  async function execBlock(stmts: Stmt[], env: Env): Promise<Val> { let last: Val = { k: "unit" }; for (const s of stmts) { if (s.n === "Let") { const v = await evalExpr(s.expr, env); env.set(s.name, v); last = { k: "unit" }; } else if (s.n === "Assign") { const v = await evalExpr(s.expr, env); env.set(s.name, v); last = { k: "unit" }; } else if (s.n === "Expr") { last = await evalExpr(s.expr, env); } else if (s.n === "Return") { throw new ReturnSignal(s.expr ? await evalExpr(s.expr, env) : { k: "unit" }); } else if (s.n === "Fn") { env.set(s.name, { k: "fn", name: s.name, params: s.params.map((p) => p.name), body: s.body, closure: env, caps: s.hasCap }); } else if (s.n === "ForIn") { const iter = await evalExpr(s.iter, env); if (iter.k !== "array") throw new EvalErr("`for` expects an iterable (array).", s.line, 0); for (const el of iter.v) { env.set(s.var, el); try { await execBlock(s.body, env); } catch (sig) { if (sig instanceof BreakSignal) break; throw sig; } } last = { k: "unit" }; } } return last; }
+  async function evalCall(e: Extract<Expr, { n: "Call" }>, env: Env): Promise<Val> {
+    if (e.callee.n === "Ident" && e.callee.name === "print") { const args = await Promise.all(e.args.map((a) => evalExpr(a, env))); output.push(args.map((a) => valToStr(a)).join(" ")); return { k: "unit" }; }
+    if (e.callee.n === "Ident" && e.callee.name === "__spawn__") { const clos = e.args[0] as any; if (!clos || clos.n !== "Closure") throw new EvalErr("spawn expects a closure.", 0, 0); const local = new Map(env); const result = await execBlock(clos.body, local); return { k: "struct", name: "TaskHandle", fields: { result, __done: { k: "bool", v: true } } }; }
+    if (e.callee.n === "Ident" && e.callee.name === "__assoc__") { const typeName = (e.args[0] as any)?.name; const methodName = (e as any).__assocName; if (typeName && impls.has(typeName)) { const m = impls.get(typeName)!.get(methodName); if (m) { const local: Env = new Map(globals); const callArgs = await Promise.all(e.args.slice(1).map((a) => evalExpr(a, env))); let ai = 0; for (const p of m.params) { if (p.name === "self") continue; local.set(p.name, callArgs[ai]); ai++; } try { return await execBlock(m.body, local); } catch (sig) { if (sig instanceof ReturnSignal) return sig.val; if (sig instanceof TrySignal) return sig.val; throw sig; } } } throw new EvalErr(`No associated function '${methodName}' on '${typeName}'.`, e.line, e.col); }
+    if (e.callee.n === "Ident" && ["len","sqrt","int_to_str","str_to_int","float_to_str","range","now","type_of","json_encode","json_decode","sha256","random_hex"].includes(e.callee.name)) { const args = await Promise.all(e.args.map((a) => evalExpr(a, env))); return applyFn(globals.get(e.callee.name)!, args); }
+    const callee = await evalExpr(e.callee, env); if (callee.k !== "fn") throw new EvalErr(`Calling a non-function (${callee.k}).`, e.line, e.col); const args = await Promise.all(e.args.map((a) => evalExpr(a, env))); return applyFn(callee, args);
   }
-  function matchPat(pat: string, v: Val): Val | null {
-    if (pat === "_") return { k: "unit" };
-    if (pat === "None" && v.k === "none") return { k: "unit" };
-    if (pat === "Some" && v.k === "some") return v.v;
-    if (pat === "Ok" && v.k === "ok") return v.v;
-    if (pat === "Err" && v.k === "err") return v.v;
-    const m = pat.match(/^(\w+)\((\w+)\)$/);
-    if (m) {
-      const head = m[1];
-      if (head === "Some" && v.k === "some") return v.v;
-      if (head === "Ok" && v.k === "ok") return v.v;
-      if (head === "Err" && v.k === "err") return v.v;
-    }
-    if (/^-?\d+$/.test(pat) && v.k === "int" && v.v === parseInt(pat, 10)) return { k: "unit" };
-    if (pat.startsWith('"') && v.k === "str" && v.v === pat.slice(1, -1)) return { k: "unit" };
-    if (v.k === "bool" && (pat === "true" || pat === "false") && v.v === (pat === "true")) return { k: "unit" };
-    return null;
-  }
-
-  function execBlock(stmts: Stmt[], env: Env): Val {
-    let last: Val = { k: "unit" };
-    for (const s of stmts) {
-      if (s.n === "Let") { const v = evalExpr(s.expr, env); env.set(s.name, v); last = { k: "unit" }; }
-      else if (s.n === "Assign") {
-        // Local rebinding. This is single-thread mutation only; spawn(move)
-        // captures a copy of the env, so cross-task mutation remains impossible.
-        const v = evalExpr(s.expr, env);
-        env.set(s.name, v);
-        last = { k: "unit" };
-      }
-      else if (s.n === "Expr") { last = evalExpr(s.expr, env); }
-      else if (s.n === "Return") { throw new ReturnSignal(s.expr ? evalExpr(s.expr, env) : { k: "unit" }); }
-      else if (s.n === "Fn") { env.set(s.name, { k: "fn", name: s.name, params: s.params.map((p) => p.name), body: s.body, closure: env, caps: s.hasCap }); }
-      else if (s.n === "ForIn") {
-        const iter = evalExpr(s.iter, env);
-        if (iter.k !== "array") throw new EvalErr("`for` expects an iterable (array).", s.line, 0);
-        for (const el of iter.v) {
-          // Bind loop var in the SAME env so mutations to outer locals persist.
-          env.set(s.var, el);
-          try { execBlock(s.body, env); }
-          catch (sig) { if (sig instanceof BreakSignal) break; throw sig; }
-        }
-        last = { k: "unit" };
-      }
-    }
-    return last;
-  }
-
-  function evalCall(e: Extract<Expr, { n: "Call" }>, env: Env): Val {
-    if (e.callee.n === "Ident" && e.callee.name === "print") {
-      const args = e.args.map((a) => evalExpr(a, env));
-      output.push(args.map((a) => valToStr(a)).join(" "));
-      return { k: "unit" };
-    }
-    if (e.callee.n === "Ident" && e.callee.name === "__spawn__") {
-      const clos = e.args[0] as any;
-      if (!clos || clos.n !== "Closure") throw new EvalErr("spawn expects a closure.", 0, 0);
-      const local = new Map(env);
-      const result = execBlock(clos.body, local);
-      return { k: "struct", name: "TaskHandle", fields: { result, __done: { k: "bool", v: true } } };
-    }
-    if (e.callee.n === "Ident" && e.callee.name === "__assoc__") {
-      // Associated function call: Type::method(args...)
-      const typeName = (e.args[0] as any)?.name;
-      const methodName = (e as any).__assocName;
-      if (typeName && impls.has(typeName)) {
-        const m = impls.get(typeName)!.get(methodName);
-        if (m) {
-          const local: Env = new Map(globals);
-          const callArgs = e.args.slice(1).map((a) => evalExpr(a, env));
-          let ai = 0;
-          for (const p of m.params) {
-            if (p.name === "self") continue;
-            local.set(p.name, callArgs[ai]); ai++;
-          }
-          try { return execBlock(m.body, local); }
-          catch (sig) {
-            if (sig instanceof ReturnSignal) return sig.val;
-            if (sig instanceof TrySignal) return sig.val; // ? propagates => function returns Err/None
-            throw sig;
-          }
-        }
-      }
-      throw new EvalErr(`No associated function '${methodName}' on '${typeName}'.`, e.line, e.col);
-    }
-    if (e.callee.n === "Ident" && (e.callee.name === "len" || e.callee.name === "sqrt" ||
-      e.callee.name === "int_to_str" || e.callee.name === "str_to_int" ||
-      e.callee.name === "float_to_str" || e.callee.name === "range" ||
-      e.callee.name === "now" || e.callee.name === "type_of" ||
-      e.callee.name === "json_encode" || e.callee.name === "json_decode" ||
-      e.callee.name === "sha256" || e.callee.name === "random_hex")) {
-      const args = e.args.map((a) => evalExpr(a, env));
-      return applyFn(globals.get(e.callee.name)!, args);
-    }
-    const callee = evalExpr(e.callee, env);
-    if (callee.k !== "fn") throw new EvalErr(`Calling a non-function (${callee.k}).`, e.line, e.col);
-    const args = e.args.map((a) => evalExpr(a, env));
-    return applyFn(callee, args);
-  }
-
-  function evalMethod(e: Extract<Expr, { n: "Method" }>, env: Env): Val {
-    const recv = evalExpr(e.recv, env);
-    // RUNTIME BACKSTOP: Verify capability tag on Module-typed receivers.
-    // Even if the static analyzer misses something, this check ensures
-    // that only legitimately-obtained Module values can execute privileged
-    // methods. A forged Module (constructed via StructLit) won't have a
-    // valid __cap with the correct session secret.
-    if (recv.k === "struct" && recv.name === "Module") {
-      const mod = recv.fields.__mod.v as string;
-      const cap = recv.fields.__cap;
-      // Verify the cap is a valid capability value with the correct session secret.
-      // User code cannot create { k: "cap" } values — they only come from the runtime.
-      // And the label must match "moduleName:sessionSecret" to prevent cross-module
-      // cap extraction (stealing fs's cap and using it for net).
-      if (!cap || cap.k !== "cap" || cap.label !== mod + ":" + sessionSecret) {
-        throw new EvalErr(`Runtime backstop: Module '${mod}' has an invalid or forged capability tag. Method '${e.name}' refused.`, e.line, e.col);
-      }
+  async function evalMethod(e: Extract<Expr, { n: "Method" }>, env: Env): Promise<Val> {
+    const recv = await evalExpr(e.recv, env);
+    if (recv.k === "struct" && recv.name === "Module") { const mod = recv.fields.__mod.v as string; const cap = recv.fields.__cap; if (!cap || cap.k !== "cap" || cap.label !== mod + ":" + sessionSecret) throw new EvalErr(`Runtime backstop: Module '${mod}' invalid capability tag.`, e.line, e.col);
       if (mod === "fs" && e.name === "read") return { k: "ok", v: { k: "str", v: "[file contents]" } };
-      // Phase 12 extended: fs.write/list/exists/delete/mkdir
-      if (mod === "fs" && e.name === "write") {
-        if (e.args.length !== 2) throw new EvalErr("fs.write requires (path, content).", e.line, e.col);
-        return { k: "ok", v: { k: "unit" } };
-      }
-      if (mod === "fs" && e.name === "list") {
-        if (e.args.length !== 1) throw new EvalErr("fs.list requires (dir).", e.line, e.col);
-        return { k: "ok", v: { k: "array", v: [{ k: "str", v: "file1.txt" }, { k: "str", v: "file2.txt" }] } };
-      }
-      if (mod === "fs" && e.name === "exists") {
-        if (e.args.length !== 1) throw new EvalErr("fs.exists requires (path).", e.line, e.col);
-        return { k: "bool", v: true };
-      }
-      if (mod === "fs" && e.name === "delete") {
-        if (e.args.length !== 1) throw new EvalErr("fs.delete requires (path).", e.line, e.col);
-        return { k: "ok", v: { k: "unit" } };
-      }
-      if (mod === "fs" && e.name === "mkdir") {
-        if (e.args.length !== 1) throw new EvalErr("fs.mkdir requires (path).", e.line, e.col);
-        return { k: "ok", v: { k: "unit" } };
-      }
+      if (mod === "fs" && e.name === "write") { if (e.args.length !== 2) throw new EvalErr("fs.write requires (path, content).", e.line, e.col); return { k: "ok", v: { k: "unit" } }; }
+      if (mod === "fs" && e.name === "list") { if (e.args.length !== 1) throw new EvalErr("fs.list requires (dir).", e.line, e.col); return { k: "ok", v: { k: "array", v: [{ k: "str", v: "file1.txt" }, { k: "str", v: "file2.txt" }] } }; }
+      if (mod === "fs" && e.name === "exists") { if (e.args.length !== 1) throw new EvalErr("fs.exists requires (path).", e.line, e.col); return { k: "bool", v: true }; }
+      if (mod === "fs" && e.name === "delete") { if (e.args.length !== 1) throw new EvalErr("fs.delete requires (path).", e.line, e.col); return { k: "ok", v: { k: "unit" } }; }
+      if (mod === "fs" && e.name === "mkdir") { if (e.args.length !== 1) throw new EvalErr("fs.mkdir requires (path).", e.line, e.col); return { k: "ok", v: { k: "unit" } }; }
       if (mod === "net" && e.name === "fetch") return { k: "ok", v: { k: "str", v: "[network response]" } };
-      if (mod === "net" && e.name === "post") {
-        if (e.args.length < 2) throw new EvalErr("net.post requires (url, body).", e.line, e.col);
-        return { k: "ok", v: { k: "str", v: "[posted]" } };
-      }
-      if (mod === "shell" && e.name === "run") {
-        if (e.args.length !== 1) throw new EvalErr("shell.run expects exactly one array argument.", e.line, e.col);
-        const arg = evalExpr(e.args[0], env);
-        if (arg.k !== "array") throw new EvalErr("shell.run expects an array of string arguments — no shell string parsing.", e.line, e.col);
-        return { k: "ok", v: { k: "str", v: "[executed: " + arg.v.map((x) => (x as any).v).join(" ") + "]" } };
-      }
-      if (mod === "db" && e.name === "query") {
-        if (e.args.length !== 2) throw new EvalErr("db.query requires (template, params).", e.line, e.col);
-        return { k: "ok", v: { k: "array", v: [] } };
-      }
-      // PHASE 13: Real AI capability module — uses z-ai CLI via subprocess
-      // Set AEGIS_MOCK_AI=1 to force mock mode (for tests)
+      if (mod === "net" && e.name === "post") { if (e.args.length < 2) throw new EvalErr("net.post requires (url, body).", e.line, e.col); return { k: "ok", v: { k: "str", v: "[posted]" } }; }
+      if (mod === "shell" && e.name === "run") { if (e.args.length !== 1) throw new EvalErr("shell.run expects one array argument.", e.line, e.col); const arg = await evalExpr(e.args[0], env); if (arg.k !== "array") throw new EvalErr("shell.run expects array.", e.line, e.col); return { k: "ok", v: { k: "str", v: "[executed: " + arg.v.map((x) => (x as any).v).join(" ") + "]" } }; }
+      if (mod === "db" && e.name === "query") { if (e.args.length !== 2) throw new EvalErr("db.query requires (template, params).", e.line, e.col); return { k: "ok", v: { k: "array", v: [] } }; }
       const useMockAI = process.env.AEGIS_MOCK_AI === "1";
-      if (mod === "ai" && e.name === "complete") {
-        if (e.args.length < 1) throw new EvalErr("ai.complete requires a prompt string.", e.line, e.col);
-        const prompt = evalExpr(e.args[0], env);
-        const promptStr = (prompt as any).v as string;
-        if (useMockAI) {
-          return { k: "ok", v: { k: "str", v: "[AI completion for: " + promptStr + "]" } };
-        }
-        try {
-          const result = Bun.spawnSync(["z-ai", "chat", "--prompt", promptStr], {
-            stdout: "pipe", stderr: "pipe", timeout: 30000,
-          });
-          const output = result.stdout.toString();
-          const match = output.match(/"content":\s*"([^"]+)"/);
-          if (match) {
-            return { k: "ok", v: { k: "str", v: match[1] } };
-          }
-          return { k: "ok", v: { k: "str", v: output.trim() } };
-        } catch {
-          return { k: "ok", v: { k: "str", v: "[AI completion for: " + promptStr + "]" } };
-        }
-      }
-      if (mod === "ai" && e.name === "chat") {
-        if (e.args.length < 1) throw new EvalErr("ai.chat requires a message string.", e.line, e.col);
-        const msg = evalExpr(e.args[0], env);
-        const msgStr = (msg as any).v as string;
-        if (useMockAI) {
-          return { k: "ok", v: { k: "str", v: "[AI chat response to: " + msgStr + "]" } };
-        }
-        try {
-          const result = Bun.spawnSync(["z-ai", "chat", "--prompt", msgStr], {
-            stdout: "pipe", stderr: "pipe", timeout: 30000,
-          });
-          const output = result.stdout.toString();
-          const match = output.match(/"content":\s*"([^"]+)"/);
-          if (match) {
-            return { k: "ok", v: { k: "str", v: match[1] } };
-          }
-          return { k: "ok", v: { k: "str", v: output.trim() } };
-        } catch {
-          return { k: "ok", v: { k: "str", v: "[AI chat response to: " + msgStr + "]" } };
-        }
-      }
-      if (mod === "ai" && e.name === "embed") {
-        if (e.args.length < 1) throw new EvalErr("ai.embed requires a text string.", e.line, e.col);
-        const text = evalExpr(e.args[0], env);
-        // Embeddings: generate deterministic pseudo-embedding (real API not available via CLI)
-        const textStr = (text as any).v as string;
-        const mockEmbedding: Val[] = [];
-        for (let i = 0; i < 3; i++) {
-          mockEmbedding.push({ k: "float", v: (textStr.charCodeAt(i % textStr.length) % 100) / 100 });
-        }
-        return { k: "ok", v: { k: "array", v: mockEmbedding } };
-      }
+      if (mod === "ai" && (e.name === "complete" || e.name === "chat")) { if (e.args.length < 1) throw new EvalErr(`ai.${e.name} requires a prompt string.`, e.line, e.col); const promptVal = await evalExpr(e.args[0], env); const promptStr = (promptVal as any).v as string; if (useMockAI) return { k: "ok", v: { k: "str", v: "[AI " + e.name + " for: " + promptStr + "]" } }; try { const ZAIModule = await import("z-ai-web-dev-sdk"); const zai = await ZAIModule.default.create(); const response = await zai.chat.completions.create({ messages: [{ role: "user", content: promptStr }], stream: false, thinking: { type: "disabled" } }); return { k: "ok", v: { k: "str", v: response.choices?.[0]?.message?.content || "" } }; } catch { return { k: "ok", v: { k: "str", v: "[AI " + e.name + " for: " + promptStr + "]" } }; } }
+      if (mod === "ai" && e.name === "embed") { if (e.args.length < 1) throw new EvalErr("ai.embed requires a text string.", e.line, e.col); const text = await evalExpr(e.args[0], env); const textStr = (text as any).v as string; const emb: Val[] = []; for (let i = 0; i < 3; i++) emb.push({ k: "float", v: (textStr.charCodeAt(i % textStr.length) % 100) / 100 }); return { k: "ok", v: { k: "array", v: emb } }; }
     }
-    if (recv.k === "struct" && impls.has(recv.name)) {
-      const m = impls.get(recv.name)!.get(e.name);
-      if (m) {
-        const local: Env = new Map(globals);
-        local.set("self", recv);
-        let ai = 0;
-        for (const p of m.params) {
-          if (p.name === "self") continue;
-          local.set(p.name, evalExpr(e.args[ai], env)); ai++;
-        }
-        try { return execBlock(m.body, local); }
-        catch (sig) {
-          if (sig instanceof ReturnSignal) return sig.val;
-          if (sig instanceof TrySignal) return sig.val;
-          throw sig;
-        }
-      }
-    }
+    if (recv.k === "struct" && impls.has(recv.name)) { const m = impls.get(recv.name)!.get(e.name); if (m) { const local: Env = new Map(globals); local.set("self", recv); let ai = 0; for (const p of m.params) { if (p.name === "self") continue; local.set(p.name, await evalExpr(e.args[ai], env)); ai++; } try { return await execBlock(m.body, local); } catch (sig) { if (sig instanceof ReturnSignal) return sig.val; if (sig instanceof TrySignal) return sig.val; throw sig; } } }
     if (recv.k === "struct" && recv.name === "TaskHandle" && e.name === "join") return { k: "ok", v: recv.fields.result };
-
-    // ----- Number methods -----
-    if (recv.k === "int" || recv.k === "float") {
-      if (e.name === "sqrt") return { k: "float", v: Math.sqrt(recv.v) };
-      if (e.name === "abs") return { k: recv.k, v: Math.abs(recv.v) };
-      if (e.name === "floor") return { k: "int", v: Math.floor(recv.v) };
-      if (e.name === "ceil") return { k: "int", v: Math.ceil(recv.v) };
-    }
-
-    // ----- String methods -----
-    if (recv.k === "str") {
-      if (e.name === "len") return { k: "int", v: recv.v.length };
-      if (e.name === "upper") return { k: "str", v: recv.v.toUpperCase() };
-      if (e.name === "lower") return { k: "str", v: recv.v.toLowerCase() };
-      if (e.name === "trim") return { k: "str", v: recv.v.trim() };
-      if (e.name === "contains") {
-        const a = evalExpr(e.args[0], env);
-        return { k: "bool", v: a.k === "str" && recv.v.includes(a.v) };
-      }
-      if (e.name === "split") {
-        const a = evalExpr(e.args[0], env);
-        if (a.k !== "str") throw new EvalErr("split() expects a String separator.", e.line, e.col);
-        const parts = recv.v.split(a.v);
-        return { k: "array", v: parts.map((s) => ({ k: "str", v: s })) };
-      }
-      if (e.name === "parse_int") {
-        const n = parseInt(recv.v, 10);
-        return isNaN(n) ? { k: "none" } : { k: "some", v: { k: "int", v: n } };
-      }
-      if (e.name === "parse_float") {
-        const n = parseFloat(recv.v);
-        return isNaN(n) ? { k: "none" } : { k: "some", v: { k: "float", v: n } };
-      }
-    }
-
-    // ----- Array methods -----
-    if (recv.k === "array") {
-      if (e.name === "len") return { k: "int", v: recv.v.length };
-      if (e.name === "push") return recv; // immutable stub
-      if (e.name === "map") {
-        const f = evalExpr(e.args[0], env);
-        return { k: "array", v: recv.v.map((el) => applyFn(f, [el])) };
-      }
-      if (e.name === "filter") {
-        const f = evalExpr(e.args[0], env);
-        const out: Val[] = [];
-        for (const el of recv.v) { const r = applyFn(f, [el]); if (r.k === "bool" && r.v) out.push(el); }
-        return { k: "array", v: out };
-      }
-      if (e.name === "reduce") {
-        const f = evalExpr(e.args[0], env);
-        let acc = evalExpr(e.args[1], env);
-        for (const el of recv.v) acc = applyFn(f, [acc, el]);
-        return acc;
-      }
-      if (e.name === "sort") {
-        const sorted = [...recv.v].sort((a, b) => {
-          const av = (a as any).v; const bv = (b as any).v;
-          if (typeof av === "number" && typeof bv === "number") return av - bv;
-          return String(av).localeCompare(String(bv));
-        });
-        return { k: "array", v: sorted };
-      }
-      if (e.name === "join") {
-        const a = evalExpr(e.args[0], env);
-        const sep = a.k === "str" ? a.v : " ";
-        return { k: "str", v: recv.v.map((x) => valToStr(x)).join(sep) };
-      }
-      if (e.name === "first") return recv.v.length ? { k: "some", v: recv.v[0] } : { k: "none" };
-      if (e.name === "last") return recv.v.length ? { k: "some", v: recv.v[recv.v.length - 1] } : { k: "none" };
-    }
-
-    // ----- Map methods -----
-    if (recv.k === "map") {
-      if (e.name === "len") return { k: "int", v: recv.v.size };
-      if (e.name === "get") {
-        const a = evalExpr(e.args[0], env);
-        if (a.k !== "str") throw new EvalErr("map.get() expects a String key.", e.line, e.col);
-        return recv.v.has(a.v) ? { k: "some", v: recv.v.get(a.v)! } : { k: "none" };
-      }
-      if (e.name === "insert") {
-        const k = evalExpr(e.args[0], env);
-        const v = evalExpr(e.args[1], env);
-        if (k.k !== "str") throw new EvalErr("map.insert() expects a String key.", e.line, e.col);
-        const m = new Map(recv.v); m.set(k.v, v);
-        return { k: "map", v: m };
-      }
-      if (e.name === "entries") {
-        const out: Val[] = [];
-        for (const [k, v] of recv.v) out.push({ k: "array", v: [{ k: "str", v: k }, v] });
-        return { k: "array", v: out };
-      }
-      if (e.name === "keys") return { k: "array", v: Array.from(recv.v.keys()).map((s) => ({ k: "str", v: s })) };
-      if (e.name === "values") return { k: "array", v: Array.from(recv.v.values()) };
-    }
-
-    // ----- Option methods -----
-    if (recv.k === "some") {
-      if (e.name === "unwrap_or") return recv.v;            // Some(x).unwrap_or(_) == x
-      if (e.name === "unwrap") return recv.v;
-      if (e.name === "is_some") return { k: "bool", v: true };
-      if (e.name === "is_none") return { k: "bool", v: false };
-    }
-    if (recv.k === "none") {
-      if (e.name === "unwrap_or") return e.args.length ? evalExpr(e.args[0], env) : { k: "unit" };  // None.unwrap_or(d) == d
-      if (e.name === "is_some") return { k: "bool", v: false };
-      if (e.name === "is_none") return { k: "bool", v: true };
-    }
-
+    if (recv.k === "int" || recv.k === "float") { if (e.name === "sqrt") return { k: "float", v: Math.sqrt(recv.v) }; if (e.name === "abs") return { k: recv.k, v: Math.abs(recv.v) }; if (e.name === "floor") return { k: "int", v: Math.floor(recv.v) }; if (e.name === "ceil") return { k: "int", v: Math.ceil(recv.v) }; }
+    if (recv.k === "str") { if (e.name === "len") return { k: "int", v: recv.v.length }; if (e.name === "upper") return { k: "str", v: recv.v.toUpperCase() }; if (e.name === "lower") return { k: "str", v: recv.v.toLowerCase() }; if (e.name === "trim") return { k: "str", v: recv.v.trim() }; if (e.name === "contains") { const a = await evalExpr(e.args[0], env); return { k: "bool", v: a.k === "str" && recv.v.includes(a.v) }; } if (e.name === "split") { const a = await evalExpr(e.args[0], env); if (a.k !== "str") throw new EvalErr("split() expects String.", e.line, e.col); return { k: "array", v: recv.v.split(a.v).map((s) => ({ k: "str", v: s })) }; } if (e.name === "parse_int") { const n = parseInt(recv.v, 10); return isNaN(n) ? { k: "none" } : { k: "some", v: { k: "int", v: n } }; } if (e.name === "parse_float") { const n = parseFloat(recv.v); return isNaN(n) ? { k: "none" } : { k: "some", v: { k: "float", v: n } }; } }
+    if (recv.k === "array") { if (e.name === "len") return { k: "int", v: recv.v.length }; if (e.name === "push") return recv; if (e.name === "map") { const f = await evalExpr(e.args[0], env); const out: Val[] = []; for (const el of recv.v) out.push(await applyFn(f, [el])); return { k: "array", v: out }; } if (e.name === "filter") { const f = await evalExpr(e.args[0], env); const out: Val[] = []; for (const el of recv.v) { const r = await applyFn(f, [el]); if (r.k === "bool" && r.v) out.push(el); } return { k: "array", v: out }; } if (e.name === "reduce") { const f = await evalExpr(e.args[0], env); let acc = await evalExpr(e.args[1], env); for (const el of recv.v) acc = await applyFn(f, [acc, el]); return acc; } if (e.name === "sort") { return { k: "array", v: [...recv.v].sort((a, b) => { const av = (a as any).v, bv = (b as any).v; return typeof av === "number" && typeof bv === "number" ? av - bv : String(av).localeCompare(String(bv)); }) }; } if (e.name === "join") { const a = await evalExpr(e.args[0], env); const sep = a.k === "str" ? a.v : " "; return { k: "str", v: recv.v.map((x) => valToStr(x)).join(sep) }; } if (e.name === "first") return recv.v.length ? { k: "some", v: recv.v[0] } : { k: "none" }; if (e.name === "last") return recv.v.length ? { k: "some", v: recv.v[recv.v.length - 1] } : { k: "none" }; }
+    if (recv.k === "map") { if (e.name === "len") return { k: "int", v: recv.v.size }; if (e.name === "get") { const a = await evalExpr(e.args[0], env); if (a.k !== "str") throw new EvalErr("map.get() expects String key.", e.line, e.col); return recv.v.has(a.v) ? { k: "some", v: recv.v.get(a.v)! } : { k: "none" }; } if (e.name === "insert") { const k = await evalExpr(e.args[0], env); const v = await evalExpr(e.args[1], env); if (k.k !== "str") throw new EvalErr("map.insert() expects String key.", e.line, e.col); const m = new Map(recv.v); m.set(k.v, v); return { k: "map", v: m }; } if (e.name === "entries") { const out: Val[] = []; for (const [k, v] of recv.v) out.push({ k: "array", v: [{ k: "str", v: k }, v] }); return { k: "array", v: out }; } if (e.name === "keys") return { k: "array", v: Array.from(recv.v.keys()).map((s) => ({ k: "str", v: s })) }; if (e.name === "values") return { k: "array", v: Array.from(recv.v.values()) }; }
+    if (recv.k === "some") { if (e.name === "unwrap_or") return recv.v; if (e.name === "unwrap") return recv.v; if (e.name === "is_some") return { k: "bool", v: true }; if (e.name === "is_none") return { k: "bool", v: false }; }
+    if (recv.k === "none") { if (e.name === "unwrap_or") return e.args.length ? await evalExpr(e.args[0], env) : { k: "unit" }; if (e.name === "is_some") return { k: "bool", v: false }; if (e.name === "is_none") return { k: "bool", v: true }; }
     throw new EvalErr(`No method '${e.name}' on ${recv.k === "struct" ? recv.name : recv.k}.`, e.line, e.col);
   }
-
   try {
-    for (const it of items) {
-      if (it.n === "Fn" || it.n === "Struct" || it.n === "Impl") continue;
-      if (it.n === "Let") { const v = evalExpr(it.expr, globals); globals.set(it.name, v); }
-      else if (it.n === "Expr") evalExpr(it.expr, globals);
-      else if (it.n === "ForIn") {
-        const iter = evalExpr(it.iter, globals);
-        if (iter.k === "array") for (const el of iter.v) { const local = new Map(globals); local.set(it.var, el); execBlock(it.body, local); }
-      }
-    }
-    if (globals.has("main")) {
-      const mainFn = globals.get("main")!;
-      if (mainFn.k === "fn") {
-        const local: Env = new Map(globals);
-        // Inject the capability value based on the parameter's type annotation.
-        // Cap (bare) → inject the full Env struct (has .fs, .net, .shell, .db fields)
-        // Cap<fs> → inject the fs Module directly (can call .read() directly)
-        // Cap<net> → inject the net Module, etc.
-        if (mainFn.params.length >= 1) {
-          // Find the first parameter with a Cap type
-          const mainItem = items.find((it) => it.n === "Fn" && it.name === "main") as Extract<Item, { n: "Fn" }> | undefined;
-          if (mainItem && mainItem.params.length >= 1) {
-            const pty = mainItem.params[0].ty;
-            if (pty === "Cap") {
-              local.set(mainFn.params[0], envObj);
-            } else if (pty.startsWith("Cap<") && pty.endsWith(">")) {
-              const mod = pty.slice(4, -1);
-              local.set(mainFn.params[0], makeModule(mod));
-            }
-          }
-        }
-        try { execBlock(mainFn.body, local); }
-        catch (sig) { if (!(sig instanceof ReturnSignal)) throw sig; }
-      }
-    }
-  } catch (err: any) {
-    if (err instanceof EvalErr) { diagnostics.push({ kind: "error", phase: "runtime", line: err.line, col: err.col, msg: err.msg }); return { ok: false, output, diagnostics }; }
-    if (err instanceof ReturnSignal) { /* fine */ }
-    else if (err instanceof BreakSignal) { /* fine */ }
-    else { diagnostics.push({ kind: "error", phase: "runtime", line: 0, col: 0, msg: String(err && err.message ? err.message : err) }); return { ok: false, output, diagnostics }; }
-  }
-
+    for (const it of items) { if (it.n === "Fn" || it.n === "Struct" || it.n === "Impl") continue; if (it.n === "Let") { const v = await evalExpr(it.expr, globals); globals.set(it.name, v); } else if (it.n === "Expr") await evalExpr(it.expr, globals); else if (it.n === "ForIn") { const iter = await evalExpr(it.iter, globals); if (iter.k === "array") for (const el of iter.v) { const local = new Map(globals); local.set(it.var, el); await execBlock(it.body, local); } } }
+    if (globals.has("main")) { const mainFn = globals.get("main")!; if (mainFn.k === "fn") { const local: Env = new Map(globals); if (mainFn.params.length >= 1) { const mainItem = items.find((it) => it.n === "Fn" && it.name === "main") as Extract<Item, { n: "Fn" }> | undefined; if (mainItem && mainItem.params.length >= 1) { const pty = mainItem.params[0].ty; if (pty === "Cap") local.set(mainFn.params[0], envObj); else if (pty.startsWith("Cap<") && pty.endsWith(">")) local.set(mainFn.params[0], makeModule(pty.slice(4, -1))); } } try { await execBlock(mainFn.body, local); } catch (sig) { if (!(sig instanceof ReturnSignal)) throw sig; } } }
+  } catch (err: any) { if (err instanceof EvalErr) { diagnostics.push({ kind: "error", phase: "runtime", line: err.line, col: err.col, msg: err.msg }); return { ok: false, output, diagnostics }; } if (err instanceof ReturnSignal) { } else if (err instanceof BreakSignal) { } else { diagnostics.push({ kind: "error", phase: "runtime", line: 0, col: 0, msg: String(err && err.message ? err.message : err) }); return { ok: false, output, diagnostics }; } }
   return { ok: !diagnostics.some((d) => d.kind === "error"), output, diagnostics };
 }

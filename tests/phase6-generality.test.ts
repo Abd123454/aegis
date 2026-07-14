@@ -14,16 +14,16 @@ import { run } from "../src/lib/aegis/interpreter";
 
 describe("Phase 6: Generality — capability in struct field", () => {
   // Capability wrapped in a user struct, accessed via field
-  test("STRESS-1: cap in struct field, accessed via field chain", () => {
-    const r = run(`struct Holder { cap: Cap }
+  test("STRESS-1: cap in struct field, accessed via field chain", async () => {
+    const r = await run(`struct Holder { cap: Cap }
     fn f(h: Holder) { h.cap.fs.read("x")? }
     fn main(env: Cap) { f(Holder { cap: env })? }`);
     expect(r.ok).toBe(true);
   });
 
   // Same struct but function has no Cap parameter — must be rejected
-  test("STRESS-1b: struct containing Cap passed to function without Cap param", () => {
-    const r = run(`struct Holder { cap: Cap }
+  test("STRESS-1b: struct containing Cap passed to function without Cap param", async () => {
+    const r = await run(`struct Holder { cap: Cap }
     fn sneaky(h) { h.cap.fs.read("x") }
     fn main() { sneaky(Holder { cap: "not env" }) }`);
     expect(r.ok).toBe(false);
@@ -32,8 +32,8 @@ describe("Phase 6: Generality — capability in struct field", () => {
 
 describe("Phase 6: Generality — capability in array", () => {
   // Capability stored in array, accessed via index
-  test("STRESS-2: cap in array element, accessed via index", () => {
-    const r = run(`fn f(arr) { arr[0]?.fs.read("x")? }
+  test("STRESS-2: cap in array element, accessed via index", async () => {
+    const r = await run(`fn f(arr) { arr[0]?.fs.read("x")? }
     fn main(env: Cap) { f([env])? }`);
     // arr[0] is Option<Cap> (array of Cap). ? unwraps it. Then .fs.read().
     // The type system handles this through general array indexing rules.
@@ -41,8 +41,8 @@ describe("Phase 6: Generality — capability in array", () => {
   });
 
   // Same with typed param
-  test("STRESS-2b: cap in array with typed param", () => {
-    const r = run(`fn f(arr: Array<Cap>) { arr[0]?.fs.read("x")? }
+  test("STRESS-2b: cap in array with typed param", async () => {
+    const r = await run(`fn f(arr: Array<Cap>) { arr[0]?.fs.read("x")? }
     fn main(env: Cap) { f([env])? }`);
     // Array<Cap> is not recognized by current parseTy (returns "other").
     // This is a known limitation — documented in parseTy.
@@ -57,8 +57,8 @@ describe("Phase 6: Generality — capability captured by closure in struct", () 
   // which is Cap-typed). However, the runtime evaluator doesn't support
   // calling struct fields as methods (b.f() where f is a field holding a fn).
   // This is a runtime limitation, not a type-system gap. The type check passes.
-  test("STRESS-3: closure capturing cap, stored in struct — type check passes", () => {
-    const r = run(`struct Box { f: fn }
+  test("STRESS-3: closure capturing cap, stored in struct — type check passes", async () => {
+    const r = await run(`struct Box { f: fn }
     fn main(env: Cap) {
         let b = Box { f: || { env.fs.read("x")? } }
         b.f()
@@ -72,8 +72,8 @@ describe("Phase 6: Generality — capability captured by closure in struct", () 
 
 describe("Phase 6: Generality — capability through function return", () => {
   // Function returns a capability value, caller uses it
-  test("STRESS-4: function returns Cap<fs>, caller uses it", () => {
-    const r = run(`fn get_fs(env: Cap) -> Cap<fs> { env.fs }
+  test("STRESS-4: function returns Cap<fs>, caller uses it", async () => {
+    const r = await run(`fn get_fs(env: Cap) -> Cap<fs> { env.fs }
     fn main(env: Cap) {
         let fs = get_fs(env)
         fs.read("x")?
@@ -82,8 +82,8 @@ describe("Phase 6: Generality — capability through function return", () => {
   });
 
   // Function returns Cap<fs> but caller has no Cap — rejected
-  test("STRESS-4b: function returns Cap but caller has no cap to pass", () => {
-    const r = run(`fn get_fs(env: Cap) -> Cap<fs> { env.fs }
+  test("STRESS-4b: function returns Cap but caller has no cap to pass", async () => {
+    const r = await run(`fn get_fs(env: Cap) -> Cap<fs> { env.fs }
     fn main() {
         let fs = get_fs("not env")
         fs.read("x")
@@ -98,8 +98,8 @@ describe("Phase 6: Generality — capability through multiple indirections", () 
   // parseTy (returns "other"). This is a known limitation documented in the
   // type system design. The test verifies the type system handles this
   // gracefully (rejects at check time rather than crashing).
-  test("STRESS-5: cap through struct+array+field chain — rejected due to Array<Cap> limitation", () => {
-    const r = run(`struct Wrapper { items: Array<Cap> }
+  test("STRESS-5: cap through struct+array+field chain — rejected due to Array<Cap> limitation", async () => {
+    const r = await run(`struct Wrapper { items: Array<Cap> }
     fn main(env: Cap) {
         let w = Wrapper { items: [env] }
         w.items[0]?.fs.read("x")?
@@ -113,8 +113,8 @@ describe("Phase 6: Generality — capability through multiple indirections", () 
 
 describe("Phase 6: Generality — no false positives on user structs", () => {
   // User struct with a method called "read" — should NOT be gated
-  test("STRESS-6: user struct method named 'read' is not gated", () => {
-    const r = run(`struct Reader { data: String }
+  test("STRESS-6: user struct method named 'read' is not gated", async () => {
+    const r = await run(`struct Reader { data: String }
     impl Reader {
         fn read(self) -> String { self.data }
     }
@@ -129,8 +129,8 @@ describe("Phase 6: Generality — no false positives on user structs", () => {
   });
 
   // User struct method named "query" — should NOT be gated
-  test("STRESS-7: user struct method named 'query' is not gated", () => {
-    const r = run(`struct Searcher { index: Int }
+  test("STRESS-7: user struct method named 'query' is not gated", async () => {
+    const r = await run(`struct Searcher { index: Int }
     impl Searcher {
         fn query(self, q: String) -> Int { self.index }
     }
@@ -144,13 +144,13 @@ describe("Phase 6: Generality — no false positives on user structs", () => {
 
 describe("Phase 6: Generality — depth limit in type checker", () => {
   // Deeply nested expression in type checking context
-  test("STRESS-8: deeply nested expression doesn't crash type checker", () => {
+  test("STRESS-8: deeply nested expression doesn't crash type checker", async () => {
     let nest = "fn main(env: Cap) { let x = ";
     for (let i = 0; i < 200; i++) nest += "Some(";
     nest += "env";
     for (let i = 0; i < 200; i++) nest += ")";
     nest += " }";
-    const r = run(nest);
+    const r = await run(nest);
     // Should not crash with RangeError — depth limit in inferType handles it
     if (!r.ok) {
       expect(r.diagnostics.some((d) => /depth|nesting/i.test(d.msg))).toBe(true);
@@ -160,16 +160,16 @@ describe("Phase 6: Generality — depth limit in type checker", () => {
 
 describe("Phase 6: Generality — capability not printable (SECRET-1a fix)", () => {
   // Printing env should not expose the session secret
-  test("STRESS-9: printing env does not expose secret", () => {
-    const r = run(`fn main(env: Cap) { print(env) }`);
+  test("STRESS-9: printing env does not expose secret", async () => {
+    const r = await run(`fn main(env: Cap) { print(env) }`);
     expect(r.ok).toBe(true);
     // The output should be "<env>" not something containing the session secret
     expect(r.output[0]).toBe("<env>");
   });
 
   // Printing env.fs should not expose the cap label
-  test("STRESS-10: printing env.fs does not expose cap label", () => {
-    const r = run(`fn main(env: Cap) { print(env.fs) }`);
+  test("STRESS-10: printing env.fs does not expose cap label", async () => {
+    const r = await run(`fn main(env: Cap) { print(env.fs) }`);
     expect(r.ok).toBe(true);
     expect(r.output[0]).toBe("<module>");
   });

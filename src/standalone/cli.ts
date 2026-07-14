@@ -36,8 +36,8 @@ Examples:
 `);
 }
 
-function runCode(code: string, checkOnly: boolean): void {
-  const result = run(code);
+async function runCode(code: string, checkOnly: boolean): Promise<void> {
+  const result = await run(code);
   if (result.diagnostics.length > 0) {
     for (const d of result.diagnostics) {
       const prefix = d.kind === "error" ? "error" : d.kind;
@@ -157,11 +157,11 @@ if (args[0] === "run") {
       console.error("Error: no code provided for -e flag");
       process.exit(1);
     }
-    runCode(args[2], false);
+    await runCode(args[2], false);
   } else if (args[1]) {
     try {
       const code = readFileSync(args[1], "utf8");
-      runCode(code, false);
+      await runCode(code, false);
     } catch (e: any) {
       console.error(`Error: cannot read file '${args[1]}': ${e?.message || e}`);
       process.exit(1);
@@ -180,7 +180,7 @@ if (args[0] === "check") {
   }
   try {
     const code = readFileSync(args[1], "utf8");
-    runCode(code, true);
+    await runCode(code, true);
   } catch (e: any) {
     console.error(`Error: cannot read file '${args[1]}': ${e?.message || e}`);
     process.exit(1);

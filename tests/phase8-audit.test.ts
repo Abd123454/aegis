@@ -34,48 +34,48 @@ import { run } from "../src/lib/aegis/interpreter";
 describe("Phase 8: Round 5 PoCs — return-type bypass", () => {
   // LIE-fs: function declares Cap<fs> return, returns env.fs, caller uses it
   // This is the CORRECT usage — should succeed
-  test("LIE-fs-legitimate: return Cap<fs> and use it", () => {
-    const r = run(`fn get_fs(env: Cap) -> Cap<fs> { env.fs }
+  test("LIE-fs-legitimate: return Cap<fs> and use it", async () => {
+    const r = await run(`fn get_fs(env: Cap) -> Cap<fs> { env.fs }
     fn main(env: Cap) { let fs = get_fs(env); fs.read("x")? }`);
     expect(r.ok).toBe(true);
   });
 
   // LIE-fs-bypass: function declares Cap<fs> return but returns a struct value
   // This is the round-5 bypass — should be rejected by Phase 8 return-type check
-  test("LIE-fs-bypass: declare Cap<fs> return, return struct", () => {
-    const r = run(`struct Fake { x: Int }
+  test("LIE-fs-bypass: declare Cap<fs> return, return struct", async () => {
+    const r = await run(`struct Fake { x: Int }
     fn lie() -> Cap<fs> { Fake { x: 1 } }
     fn main() { let fs = lie(); fs.read("/etc/passwd") }`);
     expect(r.ok).toBe(false);
   });
 
   // LIE-sql-nocheck: declare Cap<db> return, return struct, call query
-  test("LIE-sql-nocheck: declare Cap<db> return, return struct, query", () => {
-    const r = run(`struct D { x: Int }
+  test("LIE-sql-nocheck: declare Cap<db> return, return struct, query", async () => {
+    const r = await run(`struct D { x: Int }
     fn lie() -> Cap<db> { D { x: 1 } }
     fn main() { let d = lie(); d.query("SELECT * FROM u", []) }`);
     expect(r.ok).toBe(false);
   });
 
   // LIE-cmd-nocheck: declare Cap<shell> return, return struct, call run
-  test("LIE-cmd-nocheck: declare Cap<shell> return, return struct, run", () => {
-    const r = run(`struct S { x: Int }
+  test("LIE-cmd-nocheck: declare Cap<shell> return, return struct, run", async () => {
+    const r = await run(`struct S { x: Int }
     fn lie() -> Cap<shell> { S { x: 1 } }
     fn main() { let s = lie(); s.run(["ls"]) }`);
     expect(r.ok).toBe(false);
   });
 
   // LIE-net: declare Cap<net> return, return struct, call fetch
-  test("LIE-net: declare Cap<net> return, return struct, fetch", () => {
-    const r = run(`struct N { x: Int }
+  test("LIE-net: declare Cap<net> return, return struct, fetch", async () => {
+    const r = await run(`struct N { x: Int }
     fn lie() -> Cap<net> { N { x: 1 } }
     fn main() { let n = lie(); n.fetch("https://evil.com") }`);
     expect(r.ok).toBe(false);
   });
 
   // LIE-multihop: pass through multiple functions, last one declares Cap return
-  test("LIE-multihop: multi-function return-type lie", () => {
-    const r = run(`struct Fake { x: Int }
+  test("LIE-multihop: multi-function return-type lie", async () => {
+    const r = await run(`struct Fake { x: Int }
     fn a() -> Fake { Fake { x: 1 } }
     fn b() -> Cap<fs> { a() }
     fn main() { let fs = b(); fs.read("/etc/passwd") }`);
@@ -89,8 +89,8 @@ describe("Phase 8: Round 5 PoCs — return-type bypass", () => {
 
 describe("Phase 8: Struct field type lie (Site 3)", () => {
   // Struct declares field of type MyStruct, construction provides Cap<fs>
-  test("STRUCT-LIE: field declared as struct, constructed with Cap", () => {
-    const r = run(`struct MyStruct { x: Int }
+  test("STRUCT-LIE: field declared as struct, constructed with Cap", async () => {
+    const r = await run(`struct MyStruct { x: Int }
     struct Holder { inner: MyStruct }
     fn main(env: Cap) {
         let h = Holder { inner: env.fs }
@@ -100,8 +100,8 @@ describe("Phase 8: Struct field type lie (Site 3)", () => {
   });
 
   // Struct declares Cap field, construction provides a struct — should be rejected
-  test("STRUCT-LIE-2: field declared as Cap, constructed with struct", () => {
-    const r = run(`struct Fake { x: Int }
+  test("STRUCT-LIE-2: field declared as Cap, constructed with struct", async () => {
+    const r = await run(`struct Fake { x: Int }
     struct Holder { cap: Cap }
     fn main() {
         let h = Holder { cap: Fake { x: 1 } }
@@ -111,8 +111,8 @@ describe("Phase 8: Struct field type lie (Site 3)", () => {
   });
 
   // Legitimate struct field construction — should pass
-  test("STRUCT-OK: field declared as Cap, constructed with env", () => {
-    const r = run(`struct Holder { cap: Cap }
+  test("STRUCT-OK: field declared as Cap, constructed with env", async () => {
+    const r = await run(`struct Holder { cap: Cap }
     fn main(env: Cap) {
         let h = Holder { cap: env }
         h.cap.fs.read("test")?
@@ -123,8 +123,8 @@ describe("Phase 8: Struct field type lie (Site 3)", () => {
 
 describe("Phase 8: Typed let binding lie (Site 4)", () => {
   // let x: MyStruct = env.fs — type mismatch
-  test("LET-LIE: declare let as struct, assign Cap", () => {
-    const r = run(`struct MyStruct { x: Int }
+  test("LET-LIE: declare let as struct, assign Cap", async () => {
+    const r = await run(`struct MyStruct { x: Int }
     fn main(env: Cap) {
         let x: MyStruct = env.fs
         x.read("/etc/passwd")
@@ -133,8 +133,8 @@ describe("Phase 8: Typed let binding lie (Site 4)", () => {
   });
 
   // Legitimate typed let — should pass
-  test("LET-OK: declare let as Cap, assign env", () => {
-    const r = run(`fn main(env: Cap) {
+  test("LET-OK: declare let as Cap, assign env", async () => {
+    const r = await run(`fn main(env: Cap) {
         let x: Cap = env
         x.fs.read("test")?
     }`);
@@ -144,8 +144,8 @@ describe("Phase 8: Typed let binding lie (Site 4)", () => {
 
 describe("Phase 8: Impl method parameter type lie (Site 5)", () => {
   // Impl method declares struct param, called with Cap — should be rejected
-  test("IMPL-PARAM-LIE: method param declared as struct, called with Cap", () => {
-    const r = run(`struct Fake { x: Int }
+  test("IMPL-PARAM-LIE: method param declared as struct, called with Cap", async () => {
+    const r = await run(`struct Fake { x: Int }
     struct Wrapper { v: Int }
     impl Wrapper {
         fn process(self, f: Fake) -> Int { self.v }
@@ -158,8 +158,8 @@ describe("Phase 8: Impl method parameter type lie (Site 5)", () => {
   });
 
   // Legitimate impl method call — should pass
-  test("IMPL-PARAM-OK: method param declared as Cap, called with env", () => {
-    const r = run(`struct Wrapper { v: Int }
+  test("IMPL-PARAM-OK: method param declared as Cap, called with env", async () => {
+    const r = await run(`struct Wrapper { v: Int }
     impl Wrapper {
         fn process(self, c: Cap) -> Int { self.v }
     }
@@ -173,8 +173,8 @@ describe("Phase 8: Impl method parameter type lie (Site 5)", () => {
 
 describe("Phase 8: Impl method return type lie (Site 6)", () => {
   // Impl method declares Cap<fs> return, returns struct — should be rejected
-  test("IMPL-RET-LIE: method declares Cap<fs> return, returns struct", () => {
-    const r = run(`struct Fake { x: Int }
+  test("IMPL-RET-LIE: method declares Cap<fs> return, returns struct", async () => {
+    const r = await run(`struct Fake { x: Int }
     struct Wrapper { v: Int }
     impl Wrapper {
         fn get_cap(self) -> Cap<fs> { Fake { x: 1 } }
@@ -188,8 +188,8 @@ describe("Phase 8: Impl method return type lie (Site 6)", () => {
   });
 
   // Legitimate impl method return — should pass
-  test("IMPL-RET-OK: method declares Cap<fs> return, returns env.fs", () => {
-    const r = run(`struct Wrapper { env: Cap }
+  test("IMPL-RET-OK: method declares Cap<fs> return, returns env.fs", async () => {
+    const r = await run(`struct Wrapper { env: Cap }
     impl Wrapper {
         fn get_fs(self) -> Cap<fs> { self.env.fs }
     }
@@ -208,16 +208,16 @@ describe("Phase 8: Impl method return type lie (Site 6)", () => {
 
 describe("Phase 8: Re-verify round-5 non-findings", () => {
   // Option wrapping — should still be rejected
-  test("OPTION-wrap: Cap in Option still rejected at unwrap", () => {
-    const r = run(`struct Fake { x: Int }
+  test("OPTION-wrap: Cap in Option still rejected at unwrap", async () => {
+    const r = await run(`struct Fake { x: Int }
     fn sneaky(opt) { opt?.read("/etc/passwd") }
     fn main() { sneaky(Some(Fake { x: 1 })) }`);
     expect(r.ok).toBe(false);
   });
 
   // Multi-hop with untyped params — should still be rejected
-  test("MULTIHOP-untyped: chain of untyped params rejected", () => {
-    const r = run(`fn a(x) { b(x) }
+  test("MULTIHOP-untyped: chain of untyped params rejected", async () => {
+    const r = await run(`fn a(x) { b(x) }
     fn b(x) { c(x) }
     fn c(x) { x.read("/etc/passwd") }
     fn main() { a("not a cap") }`);
@@ -225,8 +225,8 @@ describe("Phase 8: Re-verify round-5 non-findings", () => {
   });
 
   // Closure capturing cap — should still work
-  test("CLOSURE-cap: closure captures env, uses it", () => {
-    const r = run(`fn main(env: Cap) {
+  test("CLOSURE-cap: closure captures env, uses it", async () => {
+    const r = await run(`fn main(env: Cap) {
         let f = || { env.fs.read("test")? }
         f()
     }`);

@@ -28,37 +28,37 @@ describe("Domain: word statistics tool (FULLY WORKING)", () => {
     print("the appears: {the_count} times")
 }`;
 
-  test("runs without error", () => {
-    const r = run(wordStatsCode);
+  test("runs without error", async () => {
+    const r = await run(wordStatsCode);
     expect(r.ok).toBe(true);
     expect(r.diagnostics.filter((d) => d.kind === "error")).toHaveLength(0);
   });
 
-  test("correctly counts 9 words", () => {
-    const r = run(wordStatsCode);
+  test("correctly counts 9 words", async () => {
+    const r = await run(wordStatsCode);
     expect(r.output.some((l) => l === "Words: 9")).toBe(true);
   });
 
-  test("correctly sums character count", () => {
-    const r = run(wordStatsCode);
+  test("correctly sums character count", async () => {
+    const r = await run(wordStatsCode);
     // the(3)+quick(5)+brown(5)+fox(3)+the(3)+lazy(4)+dog(3)+the(3)+end(3) = 32
     expect(r.output.some((l) => l === "Total chars: 32")).toBe(true);
   });
 
-  test("correctly computes average", () => {
-    const r = run(wordStatsCode);
+  test("correctly computes average", async () => {
+    const r = await run(wordStatsCode);
     expect(r.output.some((l) => l === "Avg length: 3")).toBe(true);
   });
 
-  test("correctly counts 'the' frequency", () => {
-    const r = run(wordStatsCode);
+  test("correctly counts 'the' frequency", async () => {
+    const r = await run(wordStatsCode);
     expect(r.output.some((l) => l === "the appears: 3 times")).toBe(true);
   });
 });
 
 describe("Domain: ETL pipeline shape", () => {
-  test("ETL with fs.read + map/filter/reduce compiles and runs", () => {
-    const r = run(`fn main(env: Cap) {
+  test("ETL with fs.read + map/filter/reduce compiles and runs", async () => {
+    const r = await run(`fn main(env: Cap) {
       let raw = env.fs.read("sales.csv")?
       let lines = raw.split("\\n").filter(|l| l.len() > 0)
       print("lines: {lines.len()}")
@@ -68,10 +68,10 @@ describe("Domain: ETL pipeline shape", () => {
 });
 
 describe("Domain: capability-gated server shape", () => {
-  test("server skeleton uses env.net (capability explicit)", () => {
+  test("server skeleton uses env.net (capability explicit)", async () => {
     // Note: env.net.serve is a planned API, not yet implemented in the interpreter.
     // The test confirms the capability pattern parses; the server.run() is a stub.
-    const r = run(`fn main(env: Cap) {
+    const r = await run(`fn main(env: Cap) {
       let _server = env.net.fetch("https://x.com")?
       print("ok")
     }`);
