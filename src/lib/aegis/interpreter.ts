@@ -152,10 +152,13 @@ function tokenize(src: string): { toks: Tok[]; diags: Diag[] } {
       let id = "";
       while (i < src.length && /[A-Za-z0-9_]/.test(src[i])) { id += src[i]; i++; col++; }
       if (id === "static") {
-        let j = i; while (j < src.length && (src[j] === " " || src[j] === "\t")) j++;
+        // Skip ALL whitespace (including newlines) between `static` and `mut`.
+        // The old code only skipped spaces/tabs, so `static\nmut` bypassed detection.
+        let j = i;
+        while (j < src.length && (src[j] === " " || src[j] === "\t" || src[j] === "\n" || src[j] === "\r")) j++;
         if (src.slice(j, j + 3) === "mut") {
           diags.push({ kind: "error", phase: "parse", line, col, msg: "`static mut` is forbidden. Shared mutable globals cause data races. Use a synchronized Channel or an Actor." });
-          i = j + 3; col += 3;
+          i = j + 3;
           push("forbidden", "static mut");
           continue;
         }
@@ -234,11 +237,26 @@ class Parser {
   // When parsing if/match conditions we disallow struct literals to avoid
   // ambiguity with blocks (same rule as Rust).
   noStructLit = false;
+  // Recursion depth limit — prevents uncaught RangeError on deeply nested input.
+  // 256 is well above any reasonable program depth but far below the JS stack limit.
+  depth = 0;
+  MAX_DEPTH = 256;
   constructor(toks: Tok[]) { this.toks = toks; }
   peek(o = 0): Tok { return this.toks[this.pos + o] || this.toks[this.toks.length - 1]; }
   next(): Tok { return this.toks[this.pos++]; }
   check(t: string): boolean { return this.peek().t === t; }
   eat(t: string): boolean { if (this.peek().t === t) { this.pos++; return true; } return false; }
+  // Call this at the start of every recursive parse method.
+  enterDepth(what: string): boolean {
+    this.depth++;
+    if (this.depth > this.MAX_DEPTH) {
+      this.diags.push({ kind: "error", phase: "parse", line: this.peek().line, col: this.peek().col, msg: `Maximum nesting depth (${this.MAX_DEPTH}) exceeded while parsing ${what}. Input is too deeply nested.` });
+      this.depth--;
+      return false;
+    }
+    return true;
+  }
+  exitDepth() { this.depth--; }
   expect(t: string, what: string): Tok | null {
     if (this.peek().t !== t) {
       this.diags.push({ kind: "error", phase: "parse", line: this.peek().line, col: this.peek().col, msg: `Expected ${what}, got '${this.peek().v}'.` });
@@ -280,7 +298,8 @@ class Parser {
         let ty = "Any";
         if (this.eat(":")) ty = this.parseType();
         params.push({ name: pname, ty });
-        if (ty === "Cap") hasCap = true;
+        // Recognize all Cap forms: "Cap", "Cap<fs>", "Cap<fs,net>", etc.
+        if (ty === "Cap" || ty.startsWith("Cap<")) hasCap = true;
         this.eat(",");
       }
       this.expect(")", "')'");
@@ -297,10 +316,13 @@ class Parser {
       if (this.check("<")) {
         this.eat("<");
         const inner = this.parseType();
-        let parts = [base, "<", inner];
-        if (this.eat(",")) { parts.push(","); parts.push(this.parseType()); }
+        // Collect additional type args
+        const args = [inner];
+        while (this.eat(",")) args.push(this.parseType());
         this.expect(">", "'>'");
-        return parts.join(" ");
+        // Normalize: "Cap<fs>" and "Cap< fs >" both become "Cap<fs>".
+        // The old code joined with spaces ("Cap < fs") which broke `ty === "Cap"`.
+        return base + "<" + args.join(",") + ">";
       }
       return base;
     }
@@ -389,7 +411,12 @@ class Parser {
     this.expect("}", "'}'");
     return body;
   }
-  parseExpr(): Expr | null { return this.parsePipeline(); }
+  parseExpr(): Expr | null {
+    if (!this.enterDepth("expression")) return null;
+    const e = this.parsePipeline();
+    this.exitDepth();
+    return e;
+  }
   parsePipeline(): Expr | null {
     let l = this.parseOr();
     while (this.check("|>")) {
@@ -548,7 +575,20 @@ class Parser {
   }
   parsePrimary(): Expr | null {
     const t = this.peek();
-    if (t.t === "num") { this.next(); return t.v.startsWith("i:") ? { n: "IntLit", v: parseInt(t.v.slice(2), 10), line: t.line, col: t.col } : { n: "FloatLit", v: parseFloat(t.v.slice(2)), line: t.line, col: t.col }; }
+    if (t.t === "num") {
+      this.next();
+      if (t.v.startsWith("i:")) {
+        const v = parseInt(t.v.slice(2), 10);
+        // Reject oversized integer literals at parse time.
+        // Allow up to 2147483648 so that `-2147483648` (unary minus on
+        // 2147483648) is representable as INT_MIN.
+        if (v > 2147483648 || v < -2147483648) {
+          this.diags.push({ kind: "error", phase: "parse", line: t.line, col: t.col, msg: `Integer literal ${v} exceeds 32-bit range. Use a Float literal or an explicit BigInt type.` });
+        }
+        return { n: "IntLit", v, line: t.line, col: t.col };
+      }
+      return { n: "FloatLit", v: parseFloat(t.v.slice(2)), line: t.line, col: t.col };
+    }
     if (t.t === "str") { this.next(); const p = JSON.parse(t.v); return { n: "StrLit", lit: p.lit, parts: p.parts, line: t.line, col: t.col }; }
     if (t.t === "true") { this.next(); return { n: "BoolLit", v: true }; }
     if (t.t === "false") { this.next(); return { n: "BoolLit", v: false }; }
@@ -633,62 +673,163 @@ class Parser {
 // ---------------------------------------------------------------------------
 // Static capability & safety analyzer
 // ---------------------------------------------------------------------------
-const GATED = new Set(["fs.read", "fs.write", "net.fetch", "shell.run", "db.query", "env.get"]);
+// Gated methods: the full chain must match one of these.
+// We check the FULL method chain (e.g. "env.fs.read"), not just the last
+// two components. The old code only checked "fs.read" which meant
+// "env.fs.read(...)" bypassed the check entirely.
+const GATED_METHODS = new Set([
+  "fs.read", "fs.write", "fs.list",
+  "net.fetch", "net.post", "net.serve",
+  "shell.run",
+  "db.query",
+  "env.get", "env.set",
+]);
 
-function methodModule(recv: Expr): string {
-  if (recv.n === "Ident") return recv.name;
-  if (recv.n === "Field") return methodModule(recv.recv) + "." + recv.name;
-  return "?";
+// Extract the full method chain from an expression: `env.fs.read` -> "env.fs.read"
+function methodChain(e: Expr): string {
+  if (e.n === "Ident") return e.name;
+  if (e.n === "Field") return methodChain(e.recv) + "." + e.name;
+  return "";
+}
+
+// Extract the module + method: `env.fs` -> "fs", `fs` -> "fs", `env.db` -> "db"
+// Strips the leading "env" or "cap" prefix if present.
+function methodModule(e: Expr): string {
+  const chain = methodChain(e);
+  const parts = chain.split(".");
+  // Strip leading "env" or "cap" — these are capability carrier names,
+  // not module names. "env.fs" -> "fs", "cap.net" -> "net".
+  if (parts.length >= 2 && (parts[0] === "env" || parts[0] === "cap")) {
+    return parts.slice(1).join(".");
+  }
+  return chain;
 }
 
 function analyze(items: Item[]): Diag[] {
   const diags: Diag[] = [];
-  function walkStmts(stmts: Stmt[], hasCap: boolean, locals: Set<string>) { for (const s of stmts) walkStmt(s, hasCap, locals); }
-  function walkStmt(s: Stmt, hasCap: boolean, locals: Set<string>) {
-    if (s.n === "Let") { walkExpr(s.expr, hasCap, locals); locals.add(s.name); }
-    else if (s.n === "Expr") walkExpr(s.expr, hasCap, locals);
-    else if (s.n === "Return") { if (s.expr) walkExpr(s.expr, hasCap, locals); }
-    else if (s.n === "Fn") {
-      let hc = s.hasCap; const ls = new Set<string>();
-      for (const p of s.params) { ls.add(p.name); if (p.ty === "Cap") hc = true; }
-      walkStmts(s.body, hc, ls);
-    }
-    else if (s.n === "ForIn") { walkExpr(s.iter, hasCap, locals); const ls = new Set(locals); ls.add(s.var); walkStmts(s.body, hasCap, ls); }
-    else if (s.n === "Assign") { walkExpr(s.expr, hasCap, locals); }
+  // `locals` is the set of variables declared in the current scope.
+  // `ownScope` is the set of variables declared in THIS function/block (not captured).
+  // When we enter a Closure, captured variables are in `locals` but NOT in `ownScope`.
+  // An Assign to a variable NOT in `ownScope` is a mutation of a captured variable,
+  // which is rejected (closures capture by value; mutation would silently no-op).
+  function walkStmts(stmts: Stmt[], hasCap: boolean, locals: Set<string>, ownScope: Set<string>) {
+    for (const s of stmts) walkStmt(s, hasCap, locals, ownScope);
   }
-  function walkExpr(e: Expr, hasCap: boolean, locals: Set<string>) {
+  function walkStmt(s: Stmt, hasCap: boolean, locals: Set<string>, ownScope: Set<string>) {
+    if (s.n === "Let") { walkExpr(s.expr, hasCap, locals, ownScope); locals.add(s.name); ownScope.add(s.name); }
+    else if (s.n === "Expr") walkExpr(s.expr, hasCap, locals, ownScope);
+    else if (s.n === "Return") { if (s.expr) walkExpr(s.expr, hasCap, locals, ownScope); }
+    else if (s.n === "Fn") {
+      let hc = s.hasCap; const ls = new Set<string>(locals); const os = new Set<string>();
+      for (const p of s.params) { ls.add(p.name); os.add(p.name); if (p.ty === "Cap" || p.ty.startsWith("Cap<")) hc = true; }
+      walkStmts(s.body, hc, ls, os);
+    }
+    else if (s.n === "ForIn") { walkExpr(s.iter, hasCap, locals, ownScope); const ls = new Set(locals); ls.add(s.var); const os = new Set(ownScope); os.add(s.var); walkStmts(s.body, hasCap, ls, os); }
+    else if (s.n === "Assign") {
+      walkExpr(s.expr, hasCap, locals, ownScope);
+      // Reject mutation of captured variables (variables in scope but not
+      // declared in this function/block). This would silently no-op because
+      // closures capture by value (copy of env).
+      if (!ownScope.has(s.name)) {
+        diags.push({ kind: "error", phase: "check", line: s.line, col: 0, msg: `Cannot assign to captured variable '${s.name}'. Closures capture by value; mutation of captured variables is not supported. Pass the variable as a parameter and return the new value instead.` });
+      }
+    }
+  }
+  function walkExpr(e: Expr, hasCap: boolean, locals: Set<string>, ownScope: Set<string>) {
     if (!e) return;
     switch (e.n) {
-      case "Bin": walkExpr(e.l, hasCap, locals); walkExpr(e.r, hasCap, locals); break;
-      case "Unary": walkExpr(e.e, hasCap, locals); break;
+      case "Bin": walkExpr(e.l, hasCap, locals, ownScope); walkExpr(e.r, hasCap, locals, ownScope); break;
+      case "Unary": walkExpr(e.e, hasCap, locals, ownScope); break;
       case "Call":
-        walkExpr(e.callee, hasCap, locals);
-        if (e.callee.n === "Method" && e.callee.name === "query" && e.args.length === 1)
-          diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "db.query(template) with a single string argument is forbidden — it enables SQL injection. Use the parameterized form: db.query(\"SELECT ... WHERE id = ?\", [id])." });
-        if (e.callee.n === "Method" && e.callee.name === "run" && e.args.length === 1)
-          diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "shell.run(string) is forbidden — it enables command injection. Pass structured args: shell.run([\"ls\", \"-la\"]). A capability is also required." });
-        for (const a of e.args) walkExpr(a, hasCap, locals);
+        walkExpr(e.callee, hasCap, locals, ownScope);
+        for (const a of e.args) walkExpr(a, hasCap, locals, ownScope);
         break;
       case "Method":
-        walkExpr(e.recv, hasCap, locals);
-        if (GATED.has(`${methodModule(e.recv)}.${e.name}`) && !hasCap && !locals.has("env") && !locals.has("cap"))
-          diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: `Call to '${e.name}' requires a capability (Cap) in scope — no ambient authority. Pass 'env' into this function, or declare a parameter as ': Cap'.` });
-        for (const a of e.args) walkExpr(a, hasCap, locals);
+        walkExpr(e.recv, hasCap, locals, ownScope);
+        {
+          // Check the full method chain: `env.fs.read` -> "fs.read"
+          const mod = methodModule(e.recv);
+          const fullName = mod + "." + e.name;
+          // Capability gate: fs.read, net.fetch, shell.run, db.query, etc.
+          if (GATED_METHODS.has(fullName) && !hasCap) {
+            diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: `Call to '${fullName}' requires a capability (Cap) in scope — no ambient authority. Pass 'env' (or a Cap parameter) into this function.` });
+          }
+          // db.query: must be exactly 2 args, template must be plain StrLit.
+          if (fullName === "db.query") {
+            if (e.args.length !== 2) {
+              diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "db.query requires exactly 2 arguments: (template, params). Single-string form is forbidden — it enables SQL injection." });
+            } else {
+              const tpl = e.args[0];
+              if (tpl.n !== "StrLit" || tpl.parts.some((p: any) => p.expr && p.expr.trim())) {
+                diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "db.query template must be a plain string literal (no concatenation, no interpolation). Use ? placeholders and pass values in the params array." });
+              }
+            }
+          }
+          // shell.run: must be 1 arg that is an Array of StrLit elements.
+          if (fullName === "shell.run") {
+            if (e.args.length !== 1 || e.args[0].n !== "Array") {
+              diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "shell.run requires a single array argument: shell.run([\"cmd\", \"arg1\"]). String form is forbidden — it enables command injection." });
+            } else {
+              for (const el of e.args[0].elems) {
+                if (el.n !== "StrLit" || el.parts.some((p: any) => p.expr && p.expr.trim())) {
+                  diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "shell.run array elements must be plain string literals. Variables or expressions in argv slots could smuggle shell metacharacters." });
+                }
+              }
+            }
+          }
+        }
+        for (const a of e.args) walkExpr(a, hasCap, locals, ownScope);
         break;
-      case "Field": walkExpr(e.recv, hasCap, locals); break;
-      case "Index": walkExpr(e.arr, hasCap, locals); walkExpr(e.idx, hasCap, locals); break;
-      case "Array": for (const el of e.elems) walkExpr(el, hasCap, locals); break;
-      case "MapLit": for (const p of e.pairs) walkExpr(p.val, hasCap, locals); break;
-      case "If": walkExpr(e.cond, hasCap, locals); walkStmts(e.then, hasCap, locals); if (e.els) walkStmts(e.els, hasCap, locals); break;
-      case "Match": walkExpr(e.scrut, hasCap, locals); for (const a of e.arms) walkStmts(a.body, hasCap, new Set(locals)); break;
-      case "Block": walkStmts(e.body, hasCap, locals); break;
-      case "Try": walkExpr(e.e, hasCap, locals); break;
-      case "Some": case "Ok": case "Err": walkExpr(e.e, hasCap, locals); break;
-      case "StructLit": for (const f of e.fields) walkExpr(f.val, hasCap, locals); break;
-      case "Closure": walkStmts(e.body, false, new Set(locals)); break;
+      case "Field": walkExpr(e.recv, hasCap, locals, ownScope); break;
+      case "Index": walkExpr(e.arr, hasCap, locals, ownScope); walkExpr(e.idx, hasCap, locals, ownScope); break;
+      case "Array": for (const el of e.elems) walkExpr(el, hasCap, locals, ownScope); break;
+      case "MapLit": for (const p of e.pairs) walkExpr(p.val, hasCap, locals, ownScope); break;
+      case "If": walkExpr(e.cond, hasCap, locals, ownScope); walkStmts(e.then, hasCap, locals, ownScope); if (e.els) walkStmts(e.els, hasCap, locals, ownScope); break;
+      case "Match": walkExpr(e.scrut, hasCap, locals, ownScope); for (const a of e.arms) walkStmts(a.body, hasCap, new Set(locals), new Set(ownScope)); break;
+      case "Block": walkStmts(e.body, hasCap, locals, ownScope); break;
+      case "Try": walkExpr(e.e, hasCap, locals, ownScope); break;
+      case "Some": case "Ok": case "Err": walkExpr(e.e, hasCap, locals, ownScope); break;
+      case "StructLit":
+        // Reject forged Module structs — users must not be able to construct
+        // `Module { __mod: "fs" }` to get a fake capability.
+        if (e.name === "Module" || e.name === "Env" || e.name === "TaskHandle") {
+          diags.push({ kind: "error", phase: "check", line: e.line, col: 0, msg: `Cannot construct a forged '${e.name}' value. Capability modules are only available through the 'env' parameter passed to main.` });
+        }
+        for (const f of e.fields) walkExpr(f.val, hasCap, locals, ownScope);
+        break;
+      case "Closure":
+        // Closures capture by value (copy of env). They get a fresh ownScope
+        // (only their params and local lets). Mutation of captured variables
+        // is rejected in walkStmt Assign.
+        // If `env` or a `cap` variable is in the captured locals, the closure
+        // inherits the capability (it can use env.fs.read etc.).
+        {
+          let closureHasCap = false;
+          for (const l of locals) {
+            if (l === "env" || l === "cap") { closureHasCap = true; break; }
+          }
+          walkStmts(e.body, closureHasCap, new Set(locals), new Set());
+        }
+        break;
+      case "StrLit": {
+        // CRITICAL FIX: walk interpolated expressions inside string literals.
+        // The old code didn't walk StrLit at all, so `"{env.fs.read(\"x\")}"`
+        // bypassed the capability analyzer entirely.
+        for (const part of e.parts) {
+          if (part.expr && part.expr.trim()) {
+            const { toks } = tokenize(part.expr);
+            const pp = new Parser(toks);
+            const inner = pp.parseExpr();
+            if (inner) walkExpr(inner, hasCap, locals, ownScope);
+            // Also surface any parse errors from the interpolated expression
+            for (const d of pp.diags) diags.push(d);
+          }
+        }
+        break;
+      }
     }
   }
-  for (const it of items) walkStmt(it, false, new Set());
+  for (const it of items) walkStmt(it, false, new Set(), new Set());
   return diags;
 }
 
@@ -756,10 +897,14 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
   const impls = new Map<string, Map<string, any>>();
   const capObj: Val = { k: "cap", label: "fs,net,shell,db,env" };
   const makeModule = (name: string): Val => ({ k: "struct", name: "Module", fields: { __cap: capObj, __mod: { k: "str", v: name } } });
-  // NOTE: fs/net/shell/db are NOT globals. They are reachable ONLY through `env`
-  // (the capability passed to main). This is what makes the capability model
-  // enforceable: a function without `env` in scope cannot name `fs` at all.
-  globals.set("env", { k: "struct", name: "Env", fields: { fs: makeModule("fs"), net: makeModule("net"), shell: makeModule("shell"), db: makeModule("db"), __cap: capObj } });
+  // CRITICAL FIX: `env` is NOT a global. It exists ONLY in main's local scope
+  // when main declares a Cap parameter. This means a function that does not
+  // receive `env` as a parameter cannot reach `fs`/`net`/`shell`/`db` at all —
+  // the identifier `env` is simply undefined in that scope.
+  // The old code put `env` in globals, which made the capability model
+  // bypassable: any function could reference `env.fs.read(...)` at runtime
+  // even if the analyzer failed to catch it.
+  const envObj: Val = { k: "struct", name: "Env", fields: { fs: makeModule("fs"), net: makeModule("net"), shell: makeModule("shell"), db: makeModule("db"), __cap: capObj } };
   globals.set("print", { k: "fn", name: "print", params: [], body: [], closure: new Map(), caps: false });
   globals.set("sqrt", { k: "fn", name: "sqrt", params: ["x"], body: [], closure: new Map(), caps: false });
   globals.set("len", { k: "fn", name: "len", params: ["x"], body: [], closure: new Map(), caps: false });
@@ -845,7 +990,8 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
       case "Bin": return evalBin(e, env);
       case "Unary": {
         const v = evalExpr(e.e, env);
-        if (e.op === "-" && (v.k === "int" || v.k === "float")) return { k: v.k, v: -v.v };
+        if (e.op === "-" && v.k === "int") return checkedNeg(v.v);
+        if (e.op === "-" && v.k === "float") return { k: "float", v: -v.v };
         if (e.op === "!" && v.k === "bool") return { k: "bool", v: !v.v };
         throw new EvalErr(`Bad unary '${e.op}'.`, 0, 0);
       }
@@ -885,6 +1031,31 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
     return pp.parseExpr() || { n: "Unit" };
   };
 
+  // Checked integer arithmetic: returns Err on overflow/underflow.
+  // INT_MIN = -2147483648, INT_MAX = 2147483647 (32-bit signed range).
+  const INT_MIN = -2147483648;
+  const INT_MAX = 2147483647;
+  function checkedAdd(a: number, b: number): Val {
+    const res = a + b;
+    if (res > INT_MAX || res < INT_MIN) return { k: "err", v: { k: "str", v: "integer overflow on '+' (use wrapping_add for opt-in wraparound)" } };
+    return { k: "int", v: res };
+  }
+  function checkedSub(a: number, b: number): Val {
+    const res = a - b;
+    if (res > INT_MAX || res < INT_MIN) return { k: "err", v: { k: "str", v: "integer underflow on '-' (use wrapping_sub for opt-in wraparound)" } };
+    return { k: "int", v: res };
+  }
+  function checkedMul(a: number, b: number): Val {
+    const res = a * b;
+    if (res > INT_MAX || res < INT_MIN) return { k: "err", v: { k: "str", v: "integer overflow on '*' (use wrapping_mul for opt-in wraparound)" } };
+    return { k: "int", v: res };
+  }
+  function checkedNeg(a: number): Val {
+    // Negating INT_MIN overflows: -(-2147483648) = 2147483648 > INT_MAX
+    if (a === INT_MIN) return { k: "err", v: { k: "str", v: "integer overflow on unary '-' (negating INT_MIN)" } };
+    return { k: "int", v: -a };
+  }
+
   function evalBin(e: Extract<Expr, { n: "Bin" }>, env: Env): Val {
     if (e.op === "&&") { const l = evalExpr(e.l, env); if (l.k === "bool" && !l.v) return { k: "bool", v: false }; const r = evalExpr(e.r, env); return { k: "bool", v: (l as any).v && (r as any).v }; }
     if (e.op === "||") { const l = evalExpr(e.l, env); if (l.k === "bool" && l.v) return { k: "bool", v: true }; const r = evalExpr(e.r, env); return { k: "bool", v: (l as any).v || (r as any).v }; }
@@ -895,12 +1066,17 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
       const isFloat = l.k === "float" || r.k === "float";
       switch (e.op) {
         case "+": {
-          const res = li + ri;
-          if (!isFloat && res > 2147483647) return { k: "err", v: { k: "str", v: "integer overflow (use wrapping_add for opt-in wraparound)" } };
-          return isFloat ? { k: "float", v: res } : { k: "int", v: res };
+          if (isFloat) return { k: "float", v: li + ri };
+          return checkedAdd(li, ri);
         }
-        case "-": return isFloat ? { k: "float", v: li - ri } : { k: "int", v: li - ri };
-        case "*": return isFloat ? { k: "float", v: li * ri } : { k: "int", v: li * ri };
+        case "-": {
+          if (isFloat) return { k: "float", v: li - ri };
+          return checkedSub(li, ri);
+        }
+        case "*": {
+          if (isFloat) return { k: "float", v: li * ri };
+          return checkedMul(li, ri);
+        }
         case "/": { if (ri === 0) return { k: "err", v: { k: "str", v: "division by zero" } }; return isFloat ? { k: "float", v: li / ri } : { k: "int", v: Math.trunc(li / ri) }; }
         case "%": { if (ri === 0) return { k: "err", v: { k: "str", v: "modulo by zero" } }; return { k: "int", v: li % ri }; }
       }
@@ -1188,7 +1364,12 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
       const mainFn = globals.get("main")!;
       if (mainFn.k === "fn") {
         const local: Env = new Map(globals);
-        if (mainFn.params.length >= 1) local.set(mainFn.params[0], globals.get("env")!);
+        // Inject env ONLY if main declares a Cap parameter.
+        // The env object is bound to whatever name main's first parameter has
+        // (typically `env: Cap` or `env: Cap<fs>`).
+        if (mainFn.params.length >= 1 && mainFn.caps) {
+          local.set(mainFn.params[0], envObj);
+        }
         try { execBlock(mainFn.body, local); }
         catch (sig) { if (!(sig instanceof ReturnSignal)) throw sig; }
       }
