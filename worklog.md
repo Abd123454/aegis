@@ -141,3 +141,39 @@ Stage Summary:
 - Claims now independently verifiable: 50/50 tests pass in CI (GitHub-verified).
 - Claims still self-reported (honest): no third-party audit, no formal proof, single-agent test authorship — all documented in README "What has NOT been independently verified" section.
 - Repo is live and public at https://github.com/Abd123454/aegis
+
+---
+Task ID: 4-phase
+Agent: orchestrator
+Task: Phase 4 — fix 12 confirmed vulnerabilities from independent adversarial review.
+
+Work Log:
+- An independent adversarial review found 27/39 exploit attempts succeeded against the 8 security claims.
+- Applied all 12 fixes in order:
+  1. REMOVED env from globals — env only in main's scope when Cap declared. Fixed GATED check to handle env.X.method pattern (methodModule strips "env"/"cap" prefix).
+  2. WALK StrLit in analyzer — each interpolated expression parsed and recursively analyzed with current scope.
+  3. REJECT forged Module/Env/TaskHandle structs — StructLit with these names rejected at analysis.
+  4. VALIDATE db.query template — must be plain StrLit, no concatenation/interpolation. Check moved to Method case (was in Call case, never triggered).
+  5. VALIDATE shell.run array elements — every element must be plain StrLit, no variables/expressions.
+  6. CHECK overflow on ALL operators — checkedSub, checkedMul, checkedNeg (INT_MIN), oversized literals rejected at parse.
+  7. FIX Cap<fs> parsing — type parser normalized to "Cap<fs>" not "Cap < fs"; hasCap recognizes startsWith("Cap<").
+  8. FIX static\nmut — tokenizer now skips newlines between static and mut.
+  9. ADD depth limit (256) — enterDepth/exitDepth in parseExpr; clean error instead of RangeError.
+  10. DOCUMENT spawn as synchronous — data-race guarantee is compile-time design intent only (static mut rejected, move required), not runtime-enforced.
+  11. REJECT closure mutation of captured variables — analyzer tracks ownScope; Assign to non-ownScope variable rejected.
+  12. ADDED 24 adversarial regression tests with exact PoC shapes (A1-A4, I1-I2, F1-F3, S1-S3, O1-O5, D1, L12, C1-C2, T1).
+- All 74 tests pass (50 original + 24 adversarial). 0 failures.
+- Lint clean. CI passes (3/3 runs success on GitHub).
+- Pushed to https://github.com/Abd123454/aegis
+
+SECURITY: User's PAT was used again for push. Token passed only as env var, never written to files. Remote URL cleaned after push. User advised again to revoke.
+
+Status of each fix:
+- Fixed and re-verified: #1, #2, #3, #4, #5, #6, #7, #8, #9, #11, #12
+- Partially mitigated: #10 (spawn synchronous; claim relabeled)
+- NOT claimed as "all fixed" — explicitly stated a second independent review is needed.
+
+Stage Summary:
+- 74/74 tests pass in CI. Every PoC from the review is rejected.
+- README updated with honest status: 11 fixed-and-reverified, 1 partially mitigated.
+- Explicitly flagged: these fixes were written by the same agent that needs a second independent review before claims can be trusted again.
