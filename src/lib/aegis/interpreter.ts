@@ -759,6 +759,7 @@ const GATED_METHOD_MODULE: Record<string, string> = {
   fetch: "net", post: "net", serve: "net",
   run: "shell",
   query: "db",
+  complete: "ai", chat: "ai", embed: "ai",
 };
 
 // Parse a type annotation string into a Type.
@@ -853,7 +854,7 @@ function inferType(
         const recvTy = inferType(e.recv, ctx, sft, fnRet, depth);
         if (recvTy.k === "cap" && recvTy.module === null) {
           // Accessing .fs, .net, .shell, .db on a bare Cap value
-          if (["fs", "net", "shell", "db"].includes(e.name)) {
+          if (["fs", "net", "shell", "db", "ai"].includes(e.name)) {
             return { k: "cap", module: e.name };
           }
         }
@@ -876,6 +877,11 @@ function inferType(
           // Built-in functions
           if (e.callee.name === "len" || e.callee.name === "sqrt") return { k: "other" };
           if (e.callee.name === "print") return { k: "other" };
+          // Phase 12: stdlib function return types
+          if (e.callee.name === "int_to_str" || e.callee.name === "float_to_str" || e.callee.name === "type_of") return { k: "other" };
+          if (e.callee.name === "str_to_int") return { k: "other" }; // could be Result, but "other" is safe
+          if (e.callee.name === "range") return { k: "array", elem: { k: "other" } };
+          if (e.callee.name === "now") return { k: "other" };
         }
         return { k: "other" };
       }
@@ -1410,7 +1416,7 @@ function valEq(a: Val, b: Val): boolean {
   }
 }
 
-export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell", "db", "env"]): RunResult {
+export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell", "db", "ai", "env"]): RunResult {
   const output: string[] = [];
   const diagnostics: Diag[] = [];
   const { toks, diags: lexDiags } = tokenize(source);
@@ -1445,10 +1451,17 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
   // CRITICAL FIX: `env` is NOT a global. It exists ONLY in main's local scope
   // when main declares a Cap parameter. This means a function that does not
   // receive `env` as a parameter cannot reach `fs`/`net`/`shell`/`db` at all.
-  const envObj: Val = { k: "struct", name: "Env", fields: { fs: makeModule("fs"), net: makeModule("net"), shell: makeModule("shell"), db: makeModule("db"), __cap: makeCap("env") } };
+  const envObj: Val = { k: "struct", name: "Env", fields: { fs: makeModule("fs"), net: makeModule("net"), shell: makeModule("shell"), db: makeModule("db"), ai: makeModule("ai"), __cap: makeCap("env") } };
   globals.set("print", { k: "fn", name: "print", params: [], body: [], closure: new Map(), caps: false });
   globals.set("sqrt", { k: "fn", name: "sqrt", params: ["x"], body: [], closure: new Map(), caps: false });
   globals.set("len", { k: "fn", name: "len", params: ["x"], body: [], closure: new Map(), caps: false });
+  // Phase 12: stdlib functions
+  globals.set("int_to_str", { k: "fn", name: "int_to_str", params: ["x"], body: [], closure: new Map(), caps: false });
+  globals.set("str_to_int", { k: "fn", name: "str_to_int", params: ["x"], body: [], closure: new Map(), caps: false });
+  globals.set("float_to_str", { k: "fn", name: "float_to_str", params: ["x"], body: [], closure: new Map(), caps: false });
+  globals.set("range", { k: "fn", name: "range", params: ["n"], body: [], closure: new Map(), caps: false });
+  globals.set("now", { k: "fn", name: "now", params: [], body: [], closure: new Map(), caps: false });
+  globals.set("type_of", { k: "fn", name: "type_of", params: ["x"], body: [], closure: new Map(), caps: false });
 
   for (const it of items) {
     if (it.n === "Fn") globals.set(it.name, { k: "fn", name: it.name, params: it.params.map((p) => p.name), body: it.body, closure: globals, caps: it.hasCap });
@@ -1469,6 +1482,29 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
       if (a.k === "str" || a.k === "array") return { k: "int", v: a.v.length };
       if (a.k === "map") return { k: "int", v: a.v.size };
       throw new EvalErr("len() expects str/array/map.", 0, 0);
+    }
+    // Phase 12: stdlib functions
+    if (fnVal.name === "int_to_str") return { k: "str", v: String((args[0] as any).v) };
+    if (fnVal.name === "str_to_int") {
+      const n = parseInt((args[0] as any).v, 10);
+      return isNaN(n) ? { k: "err", v: { k: "str", v: "not a valid integer" } } : { k: "int", v: n };
+    }
+    if (fnVal.name === "float_to_str") return { k: "str", v: String((args[0] as any).v) };
+    if (fnVal.name === "range") {
+      const n = (args[0] as any).v;
+      const arr: Val[] = [];
+      for (let i = 0; i < n; i++) arr.push({ k: "int", v: i });
+      return { k: "array", v: arr };
+    }
+    if (fnVal.name === "now") return { k: "int", v: Math.floor(Date.now() / 1000) };
+    if (fnVal.name === "type_of") {
+      const a = args[0];
+      const typeNames: Record<string, string> = {
+        int: "Int", float: "Float", str: "String", bool: "Bool",
+        array: "Array", map: "Map", unit: "Unit", some: "Option",
+        none: "Option", ok: "Result", err: "Result", struct: "Struct", fn: "Fn", cap: "Cap",
+      };
+      return { k: "str", v: typeNames[a.k] || a.k };
     }
     const local: Env = new Map(fnVal.closure);
     for (let i = 0; i < fnVal.params.length; i++) local.set(fnVal.params[i], args[i]);
@@ -1756,7 +1792,10 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
       }
       throw new EvalErr(`No associated function '${methodName}' on '${typeName}'.`, e.line, e.col);
     }
-    if (e.callee.n === "Ident" && (e.callee.name === "len" || e.callee.name === "sqrt")) {
+    if (e.callee.n === "Ident" && (e.callee.name === "len" || e.callee.name === "sqrt" ||
+      e.callee.name === "int_to_str" || e.callee.name === "str_to_int" ||
+      e.callee.name === "float_to_str" || e.callee.name === "range" ||
+      e.callee.name === "now" || e.callee.name === "type_of")) {
       const args = e.args.map((a) => evalExpr(a, env));
       return applyFn(globals.get(e.callee.name)!, args);
     }
@@ -1795,6 +1834,26 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
       if (mod === "db" && e.name === "query") {
         if (e.args.length !== 2) throw new EvalErr("db.query requires (template, params).", e.line, e.col);
         return { k: "ok", v: { k: "array", v: [] } };
+      }
+      // PHASE 12: AI capability module
+      if (mod === "ai" && e.name === "complete") {
+        if (e.args.length < 1) throw new EvalErr("ai.complete requires a prompt string.", e.line, e.col);
+        const prompt = evalExpr(e.args[0], env);
+        return { k: "ok", v: { k: "str", v: "[AI completion for: " + (prompt as any).v + "]" } };
+      }
+      if (mod === "ai" && e.name === "chat") {
+        if (e.args.length < 1) throw new EvalErr("ai.chat requires a message string.", e.line, e.col);
+        const msg = evalExpr(e.args[0], env);
+        return { k: "ok", v: { k: "str", v: "[AI chat response to: " + (msg as any).v + "]" } };
+      }
+      if (mod === "ai" && e.name === "embed") {
+        if (e.args.length < 1) throw new EvalErr("ai.embed requires a text string.", e.line, e.col);
+        const text = evalExpr(e.args[0], env);
+        // Return a mock embedding vector (array of floats)
+        const mockEmbedding: Val[] = [
+          { k: "float", v: 0.1 }, { k: "float", v: 0.2 }, { k: "float", v: 0.3 },
+        ];
+        return { k: "ok", v: { k: "array", v: mockEmbedding } };
       }
     }
     if (recv.k === "struct" && impls.has(recv.name)) {

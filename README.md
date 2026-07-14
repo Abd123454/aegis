@@ -3,7 +3,7 @@
 ![CI](https://github.com/Abd123454/aegis/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-research%20prototype-orange.svg)
-![Tests](https://img.shields.io/badge/tests-171%20pass-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-181%20pass-brightgreen.svg)
 ![Fuzz](https://img.shields.io/badge/fuzz-5000+%20iters%2C%200%20bypass-brightgreen.svg)
 
 > A programming language built from scratch for security-by-construction,
@@ -14,6 +14,44 @@
 **Project status: research prototype / MVP.** Not production-ready. Not
 "unhackable." The interpreter is a teaching tool that demonstrates the
 security properties; it is NOT a production compiler.
+
+---
+
+## Phase 12: Standalone CLI + Cap<ai> + stdlib
+
+Phase 12 begins the transition from research prototype to usable language.
+
+### Standalone CLI
+
+Aegis now has a standalone CLI (`src/standalone/cli.ts`) that works
+independently of Next.js:
+
+```bash
+bun run aegis run hello.aegis          # Run a file
+bun run aegis run -e 'fn main() { print("hi") }'  # Run a string
+bun run aegis check hello.aegis         # Type-check only
+bun run aegis repl                       # Interactive REPL
+bun run aegis --version                  # Print version
+```
+
+The interpreter (`src/lib/aegis/interpreter.ts`) has zero Next.js
+dependencies — it's a pure TypeScript library.
+
+### Cap<ai> — AI capability module
+
+New capability module `Cap<ai>` with three methods:
+- `env.ai.complete(prompt)` — text completion
+- `env.ai.chat(message)` — chat response
+- `env.ai.embed(text)` — text embedding (returns Array<Float>)
+
+All gated by the same capability type system as fs/net/shell/db.
+
+### Extended stdlib
+
+New built-in functions: `range(n)`, `int_to_str(x)`, `str_to_int(s)`,
+`float_to_str(x)`, `type_of(x)`, `now()`.
+
+**181 tests pass** (171 prior + 10 new Phase 12 tests). 0 failures.
 
 ---
 

@@ -43,6 +43,17 @@ backward-compatibility promise applies.
 
 ## [Unreleased]
 
+### Phase 12 — Standalone CLI + Cap<ai> + stdlib
+
+- **Added**: Standalone CLI (`src/standalone/cli.ts`) — `aegis run/check/repl`.
+- **Added**: `Cap<ai>` module with `complete`, `chat`, `embed` methods.
+- **Added**: stdlib functions: `range`, `int_to_str`, `str_to_int`, `float_to_str`, `type_of`, `now`.
+- **Added**: `aegis` and `fuzz` npm scripts.
+- **Renamed**: package name to `aegis-lang`, version to `0.12.0`.
+- **Added**: 10 new tests in `tests/phase12-cli-ai.test.ts`.
+
+All 181 tests pass. 0 failures.
+
 ### Phase 11 — Fuzzing campaign
 
 After 7 rounds of manual review, switched to automated fuzzing. Built

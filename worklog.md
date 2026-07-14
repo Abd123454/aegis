@@ -382,3 +382,22 @@ Stage Summary:
 - Stats: ~750 ok, ~4250 rejected, ~75 gated executions (all legitimate), 0 bypasses.
 - Known gaps: (1) no match/for-in/spawn generation — future coverage targets. (2) Some seeds cause interpreter hangs on deeply recursive generated programs — fuzzer uses timeout to handle. (3) Total iterations limited by hang issue — would need per-program timeout for larger campaigns.
 - Recommendation: the fuzzer complements but does not replace manual review. Future work: add match/for-in/spawn to generator, add per-program execution timeout, run longer campaigns.
+
+---
+Task ID: 12-phase
+Agent: programmer-subagent
+Task: Phase 12 — standalone CLI + Cap<ai> + stdlib functions.
+
+Work Log:
+- Read worklog Phase 11. Read interpreter.ts structure and API route.
+- Built src/standalone/cli.ts: standalone CLI with run/check/repl/version/help commands. Zero Next.js dependency.
+- Added Cap<ai> module: GATED_METHOD_MODULE entries for complete/chat/embed → "ai". envObj now includes ai: makeModule("ai"). Runtime handlers for ai.complete/chat/embed in evalMethod. Updated Field type inference to include "ai" in module list.
+- Added stdlib functions: range(n), int_to_str(x), str_to_int(s), float_to_str(x), type_of(x), now(). All in applyFn and evalCall.
+- Updated package.json: name=aegis-lang, version=0.12.0, scripts.aegis and scripts.fuzz added.
+- 10 new tests in tests/phase12-cli-ai.test.ts: AI-1 through AI-8 (capability gating, type confusion, flow through helpers), CLI-1/2 (file exists, no Next.js dependency).
+- All 181 tests pass. 0 failures.
+- Commit SHA: 8cf94e6. Pushed to GitHub (26ced22..8cf94e6 main -> main).
+
+Stage Summary:
+- Key results: Aegis now runs standalone via CLI. Cap<ai> provides AI methods gated by the same type system. stdlib expanded with 6 new functions. No security regression — all 171 prior tests still pass + 10 new ones.
+- Next phase should focus on: (1) real AI SDK integration (replace mock responses with actual z-ai-web-dev-sdk calls), (2) JSON parsing stdlib, (3) file I/O stdlib beyond mock, (4) begin Rust transpile prep (clean AST for codegen).
