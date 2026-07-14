@@ -83,3 +83,121 @@ describe("Phase 12: CLI structure", () => {
     expect(code).not.toContain("NextResponse");
   });
 });
+
+describe("Phase 12: Extended fs stdlib", () => {
+  test("FS-1: fs.write works with Cap", () => {
+    const r = run(`fn main(env: Cap) {
+      env.fs.write("test.txt", "hello")?
+    }`);
+    expect(r.ok).toBe(true);
+  });
+
+  test("FS-2: fs.list works with Cap", () => {
+    const r = run(`fn main(env: Cap) {
+      let files = env.fs.list(".")?
+      print(files)
+    }`);
+    expect(r.ok).toBe(true);
+    expect(r.output[0]).toContain("file1.txt");
+  });
+
+  test("FS-3: fs.exists works with Cap", () => {
+    const r = run(`fn main(env: Cap) {
+      print(env.fs.exists("test.txt"))
+    }`);
+    expect(r.ok).toBe(true);
+    expect(r.output[0]).toBe("true");
+  });
+
+  test("FS-4: fs.write rejected without Cap", () => {
+    const r = run(`fn main() {
+      env.fs.write("test.txt", "hello")
+    }`);
+    expect(r.ok).toBe(false);
+  });
+
+  test("FS-5: fs.delete works with Cap", () => {
+    const r = run(`fn main(env: Cap) {
+      env.fs.delete("test.txt")?
+    }`);
+    expect(r.ok).toBe(true);
+  });
+
+  test("FS-6: fs.mkdir works with Cap", () => {
+    const r = run(`fn main(env: Cap) {
+      env.fs.mkdir("newdir")?
+    }`);
+    expect(r.ok).toBe(true);
+  });
+});
+
+describe("Phase 12: JSON stdlib", () => {
+  test("JSON-1: json_encode on map", () => {
+    const r = run(`fn main() {
+      let m = #{ "name": "Aegis", "version": 12 }
+      let j = json_encode(m)?
+      print(j)
+    }`);
+    expect(r.ok).toBe(true);
+    expect(r.output[0]).toContain("Aegis");
+  });
+
+  test("JSON-2: json_decode on string", () => {
+    // Use a simple number JSON to avoid string escaping issues in Aegis tokenizer
+    const r = run(`fn main() {
+      let parsed = json_decode("42")?
+      print(parsed)
+    }`);
+    expect(r.ok).toBe(true);
+    expect(r.output[0]).toBe("42");
+  });
+
+  test("JSON-3: json_decode on invalid JSON returns Err", () => {
+    const r = run(`fn main() {
+      match json_decode("not json") {
+        Ok(v) => print("ok"),
+        Err(e) => print("error: {e}"),
+      }
+    }`);
+    expect(r.ok).toBe(true);
+    expect(r.output[0]).toContain("error");
+  });
+});
+
+describe("Phase 12: Crypto stdlib", () => {
+  test("CRYPTO-1: sha256 produces hex string", () => {
+    const r = run(`fn main() {
+      let h = sha256("hello")
+      print(h)
+    }`);
+    expect(r.ok).toBe(true);
+    expect(r.output[0]).toMatch(/^[0-9a-f]+$/);
+  });
+
+  test("CRYPTO-2: random_hex produces hex of requested length", () => {
+    const r = run(`fn main() {
+      let h = random_hex(16)
+      print(h)
+    }`);
+    expect(r.ok).toBe(true);
+    expect(r.output[0]).toHaveLength(16);
+    expect(r.output[0]).toMatch(/^[0-9a-f]+$/);
+  });
+});
+
+describe("Phase 12: net.post extended", () => {
+  test("NET-1: net.post works with Cap (2 args)", () => {
+    const r = run(`fn main(env: Cap) {
+      let r = env.net.post("https://api.example.com", "body data")?
+      print(r)
+    }`);
+    expect(r.ok).toBe(true);
+  });
+
+  test("NET-2: net.post rejected without Cap", () => {
+    const r = run(`fn main() {
+      env.net.post("https://x.com", "data")
+    }`);
+    expect(r.ok).toBe(false);
+  });
+});

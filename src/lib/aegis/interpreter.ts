@@ -755,7 +755,7 @@ type Type =
 // This is a METHOD-NAME → REQUIRED-MODULE mapping, NOT an expression-form list.
 // The gate checks: "does the receiver's TYPE provide this module's capability?"
 const GATED_METHOD_MODULE: Record<string, string> = {
-  read: "fs", write: "fs", list: "fs",
+  read: "fs", write: "fs", list: "fs", delete: "fs", mkdir: "fs", exists: "fs",
   fetch: "net", post: "net", serve: "net",
   run: "shell",
   query: "db",
@@ -882,6 +882,9 @@ function inferType(
           if (e.callee.name === "str_to_int") return { k: "other" }; // could be Result, but "other" is safe
           if (e.callee.name === "range") return { k: "array", elem: { k: "other" } };
           if (e.callee.name === "now") return { k: "other" };
+          if (e.callee.name === "json_encode") return { k: "other" };
+          if (e.callee.name === "json_decode") return { k: "other" };
+          if (e.callee.name === "sha256" || e.callee.name === "random_hex") return { k: "other" };
         }
         return { k: "other" };
       }
@@ -1405,6 +1408,48 @@ function valToStr(v: Val, depth = 0): string {
   }
 }
 
+// Phase 12: JSON conversion helpers
+function valToJSON(v: Val): any {
+  switch (v.k) {
+    case "int": case "float": return v.v;
+    case "str": return v.v;
+    case "bool": return v.v;
+    case "array": return v.v.map(valToJSON);
+    case "map": {
+      const obj: Record<string, any> = {};
+      for (const [k, x] of v.v) obj[k] = valToJSON(x);
+      return obj;
+    }
+    case "some": return valToJSON(v.v);
+    case "none": return null;
+    case "ok": return valToJSON(v.v);
+    case "err": return { error: valToJSON(v.v) };
+    case "unit": return null;
+    case "struct": {
+      const obj: Record<string, any> = {};
+      for (const [k, x] of Object.entries(v.fields)) {
+        if (!k.startsWith("__")) obj[k] = valToJSON(x);
+      }
+      return obj;
+    }
+    default: return null;
+  }
+}
+
+function jsonToVal(j: any): Val {
+  if (j === null) return { k: "none" };
+  if (typeof j === "number") return Number.isInteger(j) ? { k: "int", v: j } : { k: "float", v: j };
+  if (typeof j === "string") return { k: "str", v: j };
+  if (typeof j === "boolean") return { k: "bool", v: j };
+  if (Array.isArray(j)) return { k: "array", v: j.map(jsonToVal) };
+  if (typeof j === "object") {
+    const m = new Map<string, Val>();
+    for (const [k, x] of Object.entries(j)) m.set(k, jsonToVal(x));
+    return { k: "map", v: m };
+  }
+  return { k: "unit" };
+}
+
 function valEq(a: Val, b: Val): boolean {
   if (a.k !== b.k) return false;
   switch (a.k) {
@@ -1462,6 +1507,11 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
   globals.set("range", { k: "fn", name: "range", params: ["n"], body: [], closure: new Map(), caps: false });
   globals.set("now", { k: "fn", name: "now", params: [], body: [], closure: new Map(), caps: false });
   globals.set("type_of", { k: "fn", name: "type_of", params: ["x"], body: [], closure: new Map(), caps: false });
+  // Phase 12 extended: JSON + crypto stdlib
+  globals.set("json_encode", { k: "fn", name: "json_encode", params: ["x"], body: [], closure: new Map(), caps: false });
+  globals.set("json_decode", { k: "fn", name: "json_decode", params: ["s"], body: [], closure: new Map(), caps: false });
+  globals.set("sha256", { k: "fn", name: "sha256", params: ["s"], body: [], closure: new Map(), caps: false });
+  globals.set("random_hex", { k: "fn", name: "random_hex", params: ["n"], body: [], closure: new Map(), caps: false });
 
   for (const it of items) {
     if (it.n === "Fn") globals.set(it.name, { k: "fn", name: it.name, params: it.params.map((p) => p.name), body: it.body, closure: globals, caps: it.hasCap });
@@ -1505,6 +1555,38 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
         none: "Option", ok: "Result", err: "Result", struct: "Struct", fn: "Fn", cap: "Cap",
       };
       return { k: "str", v: typeNames[a.k] || a.k };
+    }
+    // Phase 12 extended: JSON + crypto
+    if (fnVal.name === "json_encode") {
+      const a = args[0];
+      return { k: "ok", v: { k: "str", v: JSON.stringify(valToJSON(a)) } };
+    }
+    if (fnVal.name === "json_decode") {
+      try {
+        const s = (args[0] as any).v as string;
+        const parsed = JSON.parse(s);
+        return { k: "ok", v: jsonToVal(parsed) };
+      } catch {
+        return { k: "err", v: { k: "str", v: "invalid JSON" } };
+      }
+    }
+    if (fnVal.name === "sha256") {
+      const s = (args[0] as any).v as string;
+      // Simple hash (not crypto-grade, but sufficient for demo)
+      let hash = 0;
+      for (let i = 0; i < s.length; i++) {
+        hash = ((hash << 5) - hash) + s.charCodeAt(i);
+        hash |= 0;
+      }
+      return { k: "str", v: Math.abs(hash).toString(16).padStart(8, "0") };
+    }
+    if (fnVal.name === "random_hex") {
+      const n = (args[0] as any).v as number;
+      let hex = "";
+      for (let i = 0; i < n; i++) {
+        hex += Math.floor(Math.random() * 16).toString(16);
+      }
+      return { k: "str", v: hex };
     }
     const local: Env = new Map(fnVal.closure);
     for (let i = 0; i < fnVal.params.length; i++) local.set(fnVal.params[i], args[i]);
@@ -1795,7 +1877,9 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
     if (e.callee.n === "Ident" && (e.callee.name === "len" || e.callee.name === "sqrt" ||
       e.callee.name === "int_to_str" || e.callee.name === "str_to_int" ||
       e.callee.name === "float_to_str" || e.callee.name === "range" ||
-      e.callee.name === "now" || e.callee.name === "type_of")) {
+      e.callee.name === "now" || e.callee.name === "type_of" ||
+      e.callee.name === "json_encode" || e.callee.name === "json_decode" ||
+      e.callee.name === "sha256" || e.callee.name === "random_hex")) {
       const args = e.args.map((a) => evalExpr(a, env));
       return applyFn(globals.get(e.callee.name)!, args);
     }
@@ -1823,8 +1907,32 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
         throw new EvalErr(`Runtime backstop: Module '${mod}' has an invalid or forged capability tag. Method '${e.name}' refused.`, e.line, e.col);
       }
       if (mod === "fs" && e.name === "read") return { k: "ok", v: { k: "str", v: "[file contents]" } };
+      // Phase 12 extended: fs.write/list/exists/delete/mkdir
+      if (mod === "fs" && e.name === "write") {
+        if (e.args.length !== 2) throw new EvalErr("fs.write requires (path, content).", e.line, e.col);
+        return { k: "ok", v: { k: "unit" } };
+      }
+      if (mod === "fs" && e.name === "list") {
+        if (e.args.length !== 1) throw new EvalErr("fs.list requires (dir).", e.line, e.col);
+        return { k: "ok", v: { k: "array", v: [{ k: "str", v: "file1.txt" }, { k: "str", v: "file2.txt" }] } };
+      }
+      if (mod === "fs" && e.name === "exists") {
+        if (e.args.length !== 1) throw new EvalErr("fs.exists requires (path).", e.line, e.col);
+        return { k: "bool", v: true };
+      }
+      if (mod === "fs" && e.name === "delete") {
+        if (e.args.length !== 1) throw new EvalErr("fs.delete requires (path).", e.line, e.col);
+        return { k: "ok", v: { k: "unit" } };
+      }
+      if (mod === "fs" && e.name === "mkdir") {
+        if (e.args.length !== 1) throw new EvalErr("fs.mkdir requires (path).", e.line, e.col);
+        return { k: "ok", v: { k: "unit" } };
+      }
       if (mod === "net" && e.name === "fetch") return { k: "ok", v: { k: "str", v: "[network response]" } };
-      if (mod === "net" && e.name === "post") return { k: "ok", v: { k: "str", v: "[posted]" } };
+      if (mod === "net" && e.name === "post") {
+        if (e.args.length < 2) throw new EvalErr("net.post requires (url, body).", e.line, e.col);
+        return { k: "ok", v: { k: "str", v: "[posted]" } };
+      }
       if (mod === "shell" && e.name === "run") {
         if (e.args.length !== 1) throw new EvalErr("shell.run expects exactly one array argument.", e.line, e.col);
         const arg = evalExpr(e.args[0], env);
