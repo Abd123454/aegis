@@ -908,31 +908,42 @@ function inferType(
       }
       case "Method": {
         // PHASE 8: Look up impl method return type.
-        // If the receiver is a known struct and the method is in fnRet
-        // under "StructName::methodName", return that type.
         const recvTy = inferType(e.recv, ctx, sft, fnRet, depth);
         if (recvTy.k === "struct") {
           const key = `${recvTy.name}::${e.name}`;
           if (fnRet.has(key)) return fnRet.get(key)!;
         }
         // Phase 10: infer types for known builtin methods on option/array/map.
-        // unwrap_or on Some(x) returns x's type; unwrap_or on None returns the arg type.
         if (e.name === "unwrap_or") {
           if (recvTy.k === "option" && recvTy.inner) return recvTy.inner;
-          // For None, infer from the argument
-          if (recvTy.k === "other" && e.args.length > 0) {
-            return inferType(e.args[0], ctx, sft, fnRet, depth);
-          }
+          if (recvTy.k === "other" && e.args.length > 0) return inferType(e.args[0], ctx, sft, fnRet, depth);
         }
-        // get on Map returns Option<val_type>
-        if (e.name === "get" && recvTy.k === "map") {
-          return { k: "option", inner: recvTy.val };
+        if (e.name === "get" && recvTy.k === "map") return { k: "option", inner: recvTy.val };
+        if ((e.name === "first" || e.name === "last") && recvTy.k === "array") return { k: "option", inner: recvTy.elem };
+        // Phase 15 FIX 4: Method chaining — infer return types for array/string methods
+        if (recvTy.k === "array") {
+          if (e.name === "filter" || e.name === "map" || e.name === "sort") return { k: "array", elem: { k: "other" } };
+          if (e.name === "join") return { k: "other" };
+          if (e.name === "len") return { k: "other" };
+          if (e.name === "push") return { k: "array", elem: recvTy.elem };
         }
-        // first/last on Array returns Option<elem_type>
-        if ((e.name === "first" || e.name === "last") && recvTy.k === "array") {
-          return { k: "option", inner: recvTy.elem };
+        if (recvTy.k === "str") {
+          if (e.name === "upper" || e.name === "lower" || e.name === "trim") return { k: "other" };
+          if (e.name === "split") return { k: "array", elem: { k: "other" } };
+          if (e.name === "len") return { k: "other" };
+          if (e.name === "contains") return { k: "other" };
+          if (e.name === "parse_int" || e.name === "parse_float") return { k: "option", inner: { k: "other" } };
         }
-        // Otherwise, methods return non-cap types (read returns String, etc.)
+        if (recvTy.k === "int" || recvTy.k === "float") {
+          if (e.name === "sqrt" || e.name === "abs" || e.name === "floor" || e.name === "ceil") return { k: "other" };
+        }
+        if (recvTy.k === "map") {
+          if (e.name === "insert") return { k: "map", val: recvTy.val };
+          if (e.name === "keys") return { k: "array", elem: { k: "other" } };
+          if (e.name === "values") return { k: "array", elem: recvTy.val };
+          if (e.name === "entries") return { k: "array", elem: { k: "other" } };
+          if (e.name === "len") return { k: "other" };
+        }
         return { k: "other" };
       }
       case "Try": {
@@ -1495,6 +1506,8 @@ export async function run(source: string, _grantCaps: string[] = ["fs", "net", "
   if (diagnostics.some((d) => d.kind === "error" && d.phase === "check"))
     return { ok: false, output, diagnostics };
   const globals: Env = new Map();
+  // Phase 15: HTTP server references for wait/stop
+  const serverRefs = new Map<Val, any>();
   const structDefs = new Map<string, { name: string; fields: { name: string; ty: string }[] }>();
   const impls = new Map<string, Map<string, any>>();
   const sessionSecret = Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -1603,6 +1616,61 @@ export async function run(source: string, _grantCaps: string[] = ["fs", "net", "
       if (mod === "fs" && e.name === "mkdir") { if (e.args.length !== 1) throw new EvalErr("fs.mkdir requires (path).", e.line, e.col); return { k: "ok", v: { k: "unit" } }; }
       if (mod === "net" && e.name === "fetch") return { k: "ok", v: { k: "str", v: "[network response]" } };
       if (mod === "net" && e.name === "post") { if (e.args.length < 2) throw new EvalErr("net.post requires (url, body).", e.line, e.col); return { k: "ok", v: { k: "str", v: "[posted]" } }; }
+      // Phase 15 FIX 1: HTTP server
+      if (mod === "net" && e.name === "serve") {
+        if (e.args.length < 2) throw new EvalErr("net.serve requires (port, handler).", e.line, e.col);
+        const portVal = await evalExpr(e.args[0], env);
+        const port = (portVal as any).v as number;
+        const handlerVal = await evalExpr(e.args[1], env);
+        if (handlerVal.k !== "fn") throw new EvalErr("net.serve handler must be a function.", e.line, e.col);
+        const server = Bun.serve({
+          port,
+          async fetch(req: Request) {
+            const url = new URL(req.url);
+            const reqMap = new Map<string, Val>();
+            reqMap.set("method", { k: "str", v: req.method });
+            reqMap.set("path", { k: "str", v: url.pathname });
+            reqMap.set("body", { k: "str", v: await req.text() });
+            const headersMap = new Map<string, Val>();
+            req.headers.forEach((val, key) => { headersMap.set(key, { k: "str", v: val }); });
+            reqMap.set("headers", { k: "map", v: headersMap });
+            const reqVal: Val = { k: "map", v: reqMap };
+            try {
+              const respVal = await applyFn(handlerVal, [reqVal]);
+              if (respVal.k === "ok") {
+                const respMap = respVal.v;
+                if (respMap.k === "map") {
+                  const statusVal = respMap.v.get("status");
+                  const bodyVal = respMap.v.get("body");
+                  const headersVal = respMap.v.get("headers");
+                  const status = statusVal ? (statusVal as any).v : 200;
+                  const body = bodyVal ? (bodyVal as any).v : "";
+                  const respHeaders: Record<string, string> = {};
+                  if (headersVal && headersVal.k === "map") {
+                    headersVal.v.forEach((v, k) => { respHeaders[k] = (v as any).v; });
+                  }
+                  return new Response(body, { status, headers: respHeaders });
+                }
+              }
+              return new Response(String(valToStr(respVal)), { status: 200 });
+            } catch (err: any) {
+              return new Response("Internal error: " + String(err?.message || err), { status: 500 });
+            }
+          },
+        });
+        const serverVal: Val = {
+          k: "struct", name: "Server",
+          fields: {
+            port: { k: "int", v: port },
+            _server: { k: "unit" },
+            wait: { k: "fn", name: "wait", params: [], body: [], closure: new Map(), caps: false },
+            stop: { k: "fn", name: "stop", params: [], body: [], closure: new Map(), caps: false },
+          },
+        };
+        // Store server reference for wait/stop
+        serverRefs.set(serverVal, server);
+        return { k: "ok", v: serverVal };
+      }
       if (mod === "shell" && e.name === "run") { if (e.args.length !== 1) throw new EvalErr("shell.run expects one array argument.", e.line, e.col); const arg = await evalExpr(e.args[0], env); if (arg.k !== "array") throw new EvalErr("shell.run expects array.", e.line, e.col); return { k: "ok", v: { k: "str", v: "[executed: " + arg.v.map((x) => (x as any).v).join(" ") + "]" } }; }
       if (mod === "db" && e.name === "query") { if (e.args.length !== 2) throw new EvalErr("db.query requires (template, params).", e.line, e.col); return { k: "ok", v: { k: "array", v: [] } }; }
       const useMockAI = process.env.AEGIS_MOCK_AI === "1";
@@ -1611,6 +1679,24 @@ export async function run(source: string, _grantCaps: string[] = ["fs", "net", "
     }
     if (recv.k === "struct" && impls.has(recv.name)) { const m = impls.get(recv.name)!.get(e.name); if (m) { const local: Env = new Map(globals); local.set("self", recv); let ai = 0; for (const p of m.params) { if (p.name === "self") continue; local.set(p.name, await evalExpr(e.args[ai], env)); ai++; } try { return await execBlock(m.body, local); } catch (sig) { if (sig instanceof ReturnSignal) return sig.val; if (sig instanceof TrySignal) return sig.val; throw sig; } } }
     if (recv.k === "struct" && recv.name === "TaskHandle" && e.name === "join") return { k: "ok", v: recv.fields.result };
+    // Phase 15: Server wait/stop
+    if (recv.k === "struct" && recv.name === "Server") {
+      if (e.name === "wait") {
+        const srv = serverRefs.get(recv);
+        if (srv) {
+          // Block until server stops (Ctrl+C)
+          await new Promise<void>((resolve) => {
+            process.on("SIGINT", () => { srv.stop(); resolve(); });
+          });
+        }
+        return { k: "ok", v: { k: "unit" } };
+      }
+      if (e.name === "stop") {
+        const srv = serverRefs.get(recv);
+        if (srv) srv.stop();
+        return { k: "ok", v: { k: "unit" } };
+      }
+    }
     if (recv.k === "int" || recv.k === "float") { if (e.name === "sqrt") return { k: "float", v: Math.sqrt(recv.v) }; if (e.name === "abs") return { k: recv.k, v: Math.abs(recv.v) }; if (e.name === "floor") return { k: "int", v: Math.floor(recv.v) }; if (e.name === "ceil") return { k: "int", v: Math.ceil(recv.v) }; }
     if (recv.k === "str") { if (e.name === "len") return { k: "int", v: recv.v.length }; if (e.name === "upper") return { k: "str", v: recv.v.toUpperCase() }; if (e.name === "lower") return { k: "str", v: recv.v.toLowerCase() }; if (e.name === "trim") return { k: "str", v: recv.v.trim() }; if (e.name === "contains") { const a = await evalExpr(e.args[0], env); return { k: "bool", v: a.k === "str" && recv.v.includes(a.v) }; } if (e.name === "split") { const a = await evalExpr(e.args[0], env); if (a.k !== "str") throw new EvalErr("split() expects String.", e.line, e.col); return { k: "array", v: recv.v.split(a.v).map((s) => ({ k: "str", v: s })) }; } if (e.name === "parse_int") { const n = parseInt(recv.v, 10); return isNaN(n) ? { k: "none" } : { k: "some", v: { k: "int", v: n } }; } if (e.name === "parse_float") { const n = parseFloat(recv.v); return isNaN(n) ? { k: "none" } : { k: "some", v: { k: "float", v: n } }; } }
     if (recv.k === "array") { if (e.name === "len") return { k: "int", v: recv.v.length }; if (e.name === "push") return recv; if (e.name === "map") { const f = await evalExpr(e.args[0], env); const out: Val[] = []; for (const el of recv.v) out.push(await applyFn(f, [el])); return { k: "array", v: out }; } if (e.name === "filter") { const f = await evalExpr(e.args[0], env); const out: Val[] = []; for (const el of recv.v) { const r = await applyFn(f, [el]); if (r.k === "bool" && r.v) out.push(el); } return { k: "array", v: out }; } if (e.name === "reduce") { const f = await evalExpr(e.args[0], env); let acc = await evalExpr(e.args[1], env); for (const el of recv.v) acc = await applyFn(f, [acc, el]); return acc; } if (e.name === "sort") { return { k: "array", v: [...recv.v].sort((a, b) => { const av = (a as any).v, bv = (b as any).v; return typeof av === "number" && typeof bv === "number" ? av - bv : String(av).localeCompare(String(bv)); }) }; } if (e.name === "join") { const a = await evalExpr(e.args[0], env); const sep = a.k === "str" ? a.v : " "; return { k: "str", v: recv.v.map((x) => valToStr(x)).join(sep) }; } if (e.name === "first") return recv.v.length ? { k: "some", v: recv.v[0] } : { k: "none" }; if (e.name === "last") return recv.v.length ? { k: "some", v: recv.v[recv.v.length - 1] } : { k: "none" }; }

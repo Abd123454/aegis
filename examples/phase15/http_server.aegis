@@ -1,0 +1,22 @@
+// HTTP Server — serves requests on port 3000
+fn main(env: Cap) {
+    let server = env.net.serve(3000, |req| {
+        let path = req["path"]?.unwrap_or("/")
+        let method = req["method"]?.unwrap_or("GET")
+        
+        if path == "/" {
+            Ok(#{ status: 200, body: "Hello from Aegis!" })
+        } else if path == "/json" {
+            let data = #{ "name": "Aegis", "version": 15 }
+            let json = json_encode(data)?
+            Ok(#{ status: 200, headers: #{ "Content-Type": "application/json" }, body: json })
+        } else {
+            Ok(#{ status: 404, body: "Not found" })
+        }
+    })?
+    
+    print("Server running on http://localhost:3000")
+    print("Try: curl http://localhost:3000/")
+    print("Try: curl http://localhost:3000/json")
+    server.wait()?
+}

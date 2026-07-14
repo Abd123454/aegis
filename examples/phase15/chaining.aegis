@@ -1,0 +1,14 @@
+// Method chaining — data pipeline
+fn main() {
+    let nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    
+    let result = nums
+        .filter(|x| x % 2 == 0)
+        .map(|x| x * x)
+        .join(", ")
+    print("Even squares: {result}")
+    
+    let words = ["hello", "world", "aegis"]
+    let upper = words.map(|w| w.upper()).join(" ")
+    print("Upper: {upper}")
+}
