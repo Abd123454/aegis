@@ -644,6 +644,11 @@ class Parser {
     if (t.t === "Some") { this.next(); const e = this.parsePostfix(); return e ? { n: "Some", e } : null; }
     if (t.t === "Ok") { this.next(); const e = this.parsePostfix(); return e ? { n: "Ok", e } : null; }
     if (t.t === "Err") { this.next(); const e = this.parsePostfix(); return e ? { n: "Err", e } : null; }
+    // NOTE: Some/Ok/Err use parsePostfix for their argument, which means
+    // `Some(x)?` is parsed as `Some((x)?)` not `(Some(x))?`. To apply ? to
+    // the Some/Ok/Err result, the user must write `(Some(x))?`. This is
+    // documented behavior — the ? operator binds to the argument, not the
+    // constructor.
     if (t.t === "ident" || t.t === "print") { this.next(); return { n: "Ident", name: t.v, line: t.line, col: t.col }; }
     if (t.t === "|" || t.t === "||") return this.parseLambda();
     if (t.t === "(") { this.next(); const e = this.parseExpr(); this.expect(")", "')'"); return e; }
@@ -809,6 +814,10 @@ function typeHasModuleCap(t: Type, module: string, sft: Map<string, Map<string, 
       if (typeHasModuleCap(fty, module, sft)) return true;
     }
   }
+  // Phase 10 Fix 2: recurse into option/array/map (defense-in-depth)
+  if (t.k === "option" && t.inner) return typeHasModuleCap(t.inner, module, sft);
+  if (t.k === "array" && t.elem) return typeHasModuleCap(t.elem, module, sft);
+  if (t.k === "map" && t.val) return typeHasModuleCap(t.val, module, sft);
   return false;
 }
 
@@ -879,12 +888,33 @@ function inferType(
           const key = `${recvTy.name}::${e.name}`;
           if (fnRet.has(key)) return fnRet.get(key)!;
         }
+        // Phase 10: infer types for known builtin methods on option/array/map.
+        // unwrap_or on Some(x) returns x's type; unwrap_or on None returns the arg type.
+        if (e.name === "unwrap_or") {
+          if (recvTy.k === "option" && recvTy.inner) return recvTy.inner;
+          // For None, infer from the argument
+          if (recvTy.k === "other" && e.args.length > 0) {
+            return inferType(e.args[0], ctx, sft, fnRet, depth);
+          }
+        }
+        // get on Map returns Option<val_type>
+        if (e.name === "get" && recvTy.k === "map") {
+          return { k: "option", inner: recvTy.val };
+        }
+        // first/last on Array returns Option<elem_type>
+        if ((e.name === "first" || e.name === "last") && recvTy.k === "array") {
+          return { k: "option", inner: recvTy.elem };
+        }
         // Otherwise, methods return non-cap types (read returns String, etc.)
         return { k: "other" };
       }
       case "Try": {
-        // ? propagates the inner type (unwrapped Ok/Some)
-        return inferType(e.e, ctx, sft, fnRet, depth);
+        const inner = inferType(e.e, ctx, sft, fnRet, depth);
+        // Phase 10 Fix 1: unwrap Option — `Some(x)?` gives the type of x, not Option<x>
+        if (inner.k === "option" && inner.inner) {
+          return inner.inner;
+        }
+        return inner;
       }
       case "StructLit": return { k: "struct", name: e.name };
       case "Array": {

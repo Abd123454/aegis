@@ -343,3 +343,23 @@ Stage Summary:
 - 7th independent reviewer should focus on: (1) Whether the implicit-return check covers ALL positions where a value flows out of a function — specifically, check if match arms, if-else branches, and for-loop bodies can be the last expression and whether their types are correctly inferred. (2) Whether the test audit methodology itself is sound — i.e., are there other patterns of false confidence beyond "struct without impl"? For example, tests that pass a string instead of a Cap — the runtime catches "No method on str" but the static check should catch it too. (3) Whether typesCompatible has a soundness gap for the Option/Array/Map type families that could be exploited at any annotation site.
 - Reservations: The audit was done by manual code analysis, not by actually removing static checks and re-running. I'm confident in the 6 identified false-confidence tests because their code pattern is clear (struct without impl). For the remaining 72 "yes" tests, I judged based on whether the test uses a struct WITH an impl or relies on a tokenizer/parser/runtime check that would fail regardless. Some "borderline" cases exist where the runtime would also catch the error for a different reason — I marked these as "yes" with notes.
 - AST positions considered implicit returns: only the last `Expr` statement in the outermost block of a Fn or impl method body. If/Match/ForIn as the last statement are NOT treated as implicit return positions because inferType returns "other" for them (their type is not tracked precisely enough to check). This is a known limitation — if a function's last statement is `if x > 0 { env.fs } else { env.fs }` and the declared return type is `MyS`, the check would compare "other" against "MyS" → typesCompatible returns true (because "other" is compatible with anything). This means a sophisticated bypass using if-expression as implicit return could still work. However, the R5 PoCs use bare expressions, not if-expressions, so the fix closes the immediate bypass. Documented as a known limitation.
+
+---
+Task ID: 10-phase
+Agent: programmer-subagent
+Task: Phase 10 — fix false positives on Option/Array/Map unwrapping + add test isolation suite.
+
+Work Log:
+- Read worklog Phase 9. Read interpreter.ts inferType(Try) at line 885, typeHasModuleCap at line 802.
+- Applied Fix 1 (interpreter.ts:885-892): inferType(Try) now unwraps Option — returns inner.inner instead of the option type.
+- Applied Fix 2 (interpreter.ts:812-815): typeHasModuleCap recurses into option/array/map types.
+- Applied Fix 3 (interpreter.ts:891-907): inferType(Method) now infers return types for unwrap_or (returns inner), get (returns Option<val>), first/last (returns Option<elem>).
+- Discovered operator precedence issue: Some(x)? parses as Some((x)?) — the ? binds to the argument, not the constructor. Documented in parser and tests. Tests use (Some(x))? syntax.
+- Created tests/phase10-isolation.test.ts with 14 tests: F1, F2, BYPASS-CHECK, ARRAY-CAP, MAP-CAP, ISOLATE-FixB, ISOLATE-FixA, ISOLATE-Return, ISOLATE-ImplicitReturn, ISOLATE-StructField, ISOLATE-TypedLet, ISOLATE-ImplArg, LEGIT-return, LEGIT-struct.
+- All 171 tests pass. 0 failures.
+- Commit SHA: 40923dd. Pushed to GitHub (3388215..40923dd main -> main).
+
+Stage Summary:
+- Key results: 3 false positives fixed (Option unwrapping, unwrap_or, get/first/last type inference). 14 isolation tests added. No bypasses opened — bypass check confirms fn lie() -> MyS { (Some(env.fs))? } still rejected.
+- 8th independent reviewer: brief should be very short since no bypass was found in round 7. Focus on whether the new type inference for builtin methods (unwrap_or/get/first/last) could be exploited — e.g., does inferring Cap<fs> for unwrap_or create a way to launder a capability through a type that should be rejected?
+- Reservations: The operator precedence issue (Some(x)? = Some((x)?)) is a known limitation. Fixing it would require changing parsePrimary for Some/Ok/Err to not use parsePostfix, which could break other things. Documented instead of fixed.

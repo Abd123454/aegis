@@ -3,7 +3,7 @@
 ![CI](https://github.com/Abd123454/aegis/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-research%20prototype-orange.svg)
-![Tests](https://img.shields.io/badge/tests-157%20pass-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-171%20pass-brightgreen.svg)
 
 > A programming language built from scratch for security-by-construction,
 > ease of learning, and universal reach. This repository contains the
@@ -13,6 +13,35 @@
 **Project status: research prototype / MVP.** Not production-ready. Not
 "unhackable." The interpreter is a teaching tool that demonstrates the
 security properties; it is NOT a production compiler.
+
+---
+
+## Phase 10: Option/Array/Map type recursion + test isolation (eighth attempt)
+
+The seventh independent review found **no bypasses** but identified 3
+non-security issues: two false positives (legitimate code rejected) and
+test isolation gaps. Phase 10 is a **light usability + test quality fix**.
+
+### What changed
+
+1. **Fix 1 — `inferType(Try)` unwraps Option**: `(Some(x))?` now infers
+   as the type of `x`, not `Option<x>`. This fixes the false positive
+   where `(Some(env.fs))?` then `.read()` was rejected.
+2. **Fix 2 — `typeHasModuleCap` recurses into option/array/map**: defense-
+   in-depth so the gate is robust even if type inference changes.
+3. **Fix 3 — Test isolation suite**: 14 new tests in
+   `tests/phase10-isolation.test.ts`, each isolating a single static check
+   (Fix A, Fix B, return type, implicit return, struct field, typed let,
+   impl arg) so the audit can verify each check works independently.
+4. **`inferType(Method)` improved**: `unwrap_or`, `get`, `first`, `last`
+   now infer correct return types (inner type for unwrap_or, Option<val>
+   for get, Option<elem> for first/last).
+
+**Note on syntax**: `Some(x)?` parses as `Some((x)?)` in Aegis — the `?`
+binds to the argument, not the constructor. Use `(Some(x))?` to apply `?`
+to the Some value. This is documented in the parser.
+
+**171 tests pass** (157 prior + 14 new). 0 failures.
 
 ---
 

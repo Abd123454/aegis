@@ -43,6 +43,19 @@ backward-compatibility promise applies.
 
 ## [Unreleased]
 
+### Phase 10 — Option/Array/Map type recursion + test isolation (eighth attempt)
+
+The seventh independent review found no bypasses but identified false
+positives and test isolation gaps. Phase 10 is a light usability fix.
+
+- **Fixed**: `inferType(Try)` now unwraps Option — `(Some(x))?` infers as x's type.
+- **Fixed**: `typeHasModuleCap` recurses into option/array/map (defense-in-depth).
+- **Fixed**: `inferType(Method)` infers return types for `unwrap_or`, `get`, `first`, `last`.
+- **Added**: 14 test isolation tests in `tests/phase10-isolation.test.ts`.
+- **Documented**: `Some(x)?` parses as `Some((x)?)` — use `(Some(x))?` for ? on Some.
+
+All 171 tests pass. 0 failures.
+
 ### Phase 9 — Implicit return type check + test suite audit (seventh attempt)
 
 Round 6 found that Phase 8's return-type check only covered explicit `return`
