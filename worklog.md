@@ -209,3 +209,36 @@ Stage Summary:
 - This is the SECOND fix attempt for ambient-authority. If a third review finds it incomplete, the capability model needs a fundamental type-system-level redesign (e.g. a real capability type with linear/affine properties), not a third name-based patch.
 - A third independent review (fresh context) should be commissioned, focused on whether capability-value tracking holds under aliasing, indirection, and the runtime backstop.
 - SECURITY: User's PAT used for push. Token passed only as env var. Remote URL cleaned. User advised to revoke.
+
+---
+Task ID: 6-phase
+Agent: orchestrator
+Task: Phase 6 — real capability type system. Foundational redesign, fourth attempt at ambient-authority.
+
+Work Log:
+- Three prior reviews found the same class of bug three times: enumeration-based approaches always have an uncovered form.
+- Phase 6 replaces ALL enumeration with a type system:
+  * Type representation: cap | struct | array | map | option | other
+  * inferType(e, ctx, sft, fnRet): general type inference via standard typing rules
+  * typeHasCap(t, sft): recursive check if type contains capability
+  * typeHasModuleCap(t, module, sft): check if type provides specific module
+  * typeCheck(items): replaces analyze(). Gate checks typeHasModuleCap(typeOf(recv), module)
+- Removed: isCapExpr, GATED_FULL, GATED_NAMES, methodModule, methodChain, fixpoint propagation
+- SECRET-1a fix: cap/Module/Env values no longer expose session secret when printed
+- Depth limit in inferType (256 max)
+- Gate design: applies when receiver contains Cap (enforce module match) OR is unknown/non-user-struct (reject). User structs with gated method names are allowed (no false positives).
+- 13 generality stress tests added (struct fields, arrays, closures in structs, function returns, multiple indirections, false positives, depth, secret leak)
+- Updated Phase 5 tests: untyped param flow now correctly rejected; Cap<fs> test uses env.read() directly
+- All 110 tests pass. 0 failures.
+- 35/35 PoCs from all 3 reviews verified individually:
+  * Review 1: 17/17 (A1,A3,A4,I1,I2,F1,F2,F3,S1,S2,S3,O1,O3,O5,D1,L12,C1)
+  * Review 2: 13/13 (AMBIENT-A/B/C/D,SQL-A/B,CMD-A/B,INT-A/B,CLOS-A,NEST-A/B)
+  * Review 3: 5/5 (RET-FP,ARR-FP,SECRET-1a,BYPASS-struct,BYPASS-return)
+- CI passes on GitHub (success).
+- Pushed to https://github.com/Abd123454/aegis
+
+Stage Summary:
+- This is the FOURTH attempt. Structurally different: propagation by general typing rules, not enumeration.
+- If a fourth review finds this incomplete, the flaw would be in the type system itself (unsound rule, bad coercion, runtime shape without type), NOT in a missing expression form.
+- A fourth independent review should be commissioned with a different brief: hunt for type-system unsoundness, not missing expression forms.
+- SECURITY: User's PAT used for push. Token passed only as env var. Remote URL cleaned.
