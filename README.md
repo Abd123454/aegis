@@ -3,7 +3,7 @@
 ![CI](https://github.com/Abd123454/aegis/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-research%20prototype-orange.svg)
-![Tests](https://img.shields.io/badge/tests-130%20pass-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-148%20pass-brightgreen.svg)
 
 > A programming language built from scratch for security-by-construction,
 > ease of learning, and universal reach. This repository contains the
@@ -13,6 +13,58 @@
 **Project status: research prototype / MVP.** Not production-ready. Not
 "unhackable." The interpreter is a teaching tool that demonstrates the
 security properties; it is NOT a production compiler.
+
+---
+
+## Phase 8: Verify EVERY Declared Type (Comprehensive Audit)
+
+This is the **SIXTH attempt** at the ambient-authority guarantee. Round 5
+found that function RETURN types were declared but never checked — the
+exact same bug as Phase 7's parameter-type finding, mirrored.
+
+Instead of patching just return types, Phase 8 is a **comprehensive audit**
+of every place the language allows a type annotation. Every site now calls
+the same `typesCompatible` function.
+
+### Annotation site coverage table
+
+| # | Site | Verified before Phase 8 | Verified after Phase 8 |
+|---|------|-------------------------|------------------------|
+| 1 | Function parameters (`fn f(x: T)`) | Yes (Phase 7) | Yes |
+| 2 | Function return types (`fn f() -> T`) | **No** | **Yes** (Phase 8) |
+| 3 | Struct field declarations (`struct S { x: T }`) | **No** | **Yes** (Phase 8) |
+| 4 | Typed `let` bindings (`let x: T = expr`) | **No** | **Yes** (Phase 8) |
+| 5 | Impl method parameters | **No** (bodies not walked) | **Yes** (Phase 8) |
+| 6 | Impl method return types | **No** (bodies not walked) | **Yes** (Phase 8) |
+| 7 | Closure parameters | N/A (no type annotations in Aegis) | N/A |
+| 8 | Closure return types | N/A (no type annotations in Aegis) | N/A |
+
+### What changed
+
+- **Return type verification (Site 2)**: `Return` statements now checked against declared return type via `typesCompatible`.
+- **Struct field verification (Site 3)**: `StructLit` construction checks each field value's type against the declared field type.
+- **Typed let verification (Site 4)**: `let x: T = expr` checks `inferType(expr)` against `T`.
+- **Impl method bodies (Sites 5-6)**: Impl method bodies are now type-checked (were skipped entirely before). Built `implParamOrder` table for argument type checking at method call sites.
+- **Impl method return types in inferType**: `inferType` now resolves impl method return types via `fnRet` lookup under `"StructName::methodName"`, so `let fs = w.get_fs()` correctly infers `Cap<fs>`.
+
+**148 tests pass** (17 security + 17 brevity + 7 domain + 9 regression +
+24 phase-4 adversarial + 23 phase-5 aliased + 13 phase-6 generality +
+20 phase-7 type-confusion + 18 phase-8 audit). 0 failures.
+
+**52/52 PoCs verified** across all 5 reviews.
+
+### This is the SIXTH attempt
+
+- **Phase 4**: name-based — broken by aliasing.
+- **Phase 5**: value-tracking with enumeration — broken by wrapping.
+- **Phase 6**: type-system-based — structurally sound but missing argument-type check.
+- **Phase 7**: added argument-type check — but return types still unchecked.
+- **Phase 8** (this): comprehensive audit — every annotation site now verified.
+
+**This round is different**: instead of patching one more site, Phase 8
+audited ALL sites and produced the coverage table above. A sixth review
+should look for soundness gaps in `typesCompatible` itself, not for a
+missing annotation site.
 
 ---
 

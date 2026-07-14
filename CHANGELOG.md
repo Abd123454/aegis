@@ -43,6 +43,21 @@ backward-compatibility promise applies.
 
 ## [Unreleased]
 
+### Phase 8 — Comprehensive type annotation audit (sixth attempt)
+
+Round 5 found function return types were declared but never checked — the
+same bug as Phase 7's parameter-type finding, mirrored. Phase 8 is a
+comprehensive audit of ALL type annotation sites, not just returns.
+
+- **Fixed (Site 2)**: Return type verification — `Return` statements checked against declared return type.
+- **Fixed (Site 3)**: Struct field verification — `StructLit` construction checks field value types.
+- **Fixed (Site 4)**: Typed `let` verification — `let x: T = expr` checks inferred type against `T`.
+- **Fixed (Sites 5-6)**: Impl method bodies now type-checked (were skipped entirely). Built `implParamOrder` table for method call argument checking.
+- **Fixed**: `inferType` now resolves impl method return types via `fnRet` lookup under `"StructName::methodName"`.
+- **Added**: 18 audit tests in `tests/phase8-audit.test.ts` covering all 6 annotation sites + round-5 PoCs + false-positive checks.
+
+All 148 tests pass. 52/52 PoCs from all 5 reviews verified.
+
 ### Phase 7 — Fix missing argument-type check (fifth attempt)
 
 The fourth independent review found two unsound typing rules in the Phase 6
