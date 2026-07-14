@@ -478,7 +478,22 @@ class Parser {
     return l;
   }
   parseUnary(): Expr | null {
-    if (this.check("-") || this.check("!")) { const op = this.next().t; const e = this.parseUnary(); return e ? { n: "Unary", op, e } : null; }
+    if (this.check("-")) {
+      this.next(); // consume "-"
+      // Special case: -2147483648 is INT_MIN, the only negative literal
+      // representable in 32-bit signed. If the next token is the literal
+      // 2147483648, produce IntLit(-2147483648) directly instead of
+      // Unary(-, IntLit(2147483648)) which would be rejected by the
+      // oversized-literal check.
+      const t = this.peek();
+      if (t.t === "num" && t.v === "i:2147483648") {
+        this.next();
+        return { n: "IntLit", v: -2147483648, line: t.line, col: t.col };
+      }
+      const e = this.parseUnary();
+      return e ? { n: "Unary", op: "-", e } : null;
+    }
+    if (this.check("!")) { const op = this.next().t; const e = this.parseUnary(); return e ? { n: "Unary", op, e } : null; }
     return this.parsePostfix();
   }
   parsePostfix(): Expr | null {
@@ -598,9 +613,10 @@ class Parser {
       if (t.v.startsWith("i:")) {
         const v = parseInt(t.v.slice(2), 10);
         // Reject oversized integer literals at parse time.
-        // Allow up to 2147483648 so that `-2147483648` (unary minus on
-        // 2147483648) is representable as INT_MIN.
-        if (v > 2147483648 || v < -2147483648) {
+        // Only INT_MIN (-2147483648) is representable; it's handled as a
+        // special case in parseUnary (unary minus on 2147483648 literal).
+        // Any bare positive literal above 2147483647 is rejected.
+        if (v > 2147483647 || v < -2147483648) {
           this.diags.push({ kind: "error", phase: "parse", line: t.line, col: t.col, msg: `Integer literal ${v} exceeds 32-bit range. Use a Float literal or an explicit BigInt type.` });
         }
         return { n: "IntLit", v, line: t.line, col: t.col };
@@ -884,13 +900,77 @@ function typeCheck(items: Item[]): Diag[] {
   }
 
   // 3. Build function parameter type table: fnName -> (paramName -> Type)
+  //    Also build ordered param list for positional arg checking.
   const fnParams = new Map<string, Map<string, Type>>();
+  const fnParamOrder = new Map<string, { name: string; ty: Type }[]>();
   for (const it of items) {
     if (it.n === "Fn") {
       const params = new Map<string, Type>();
-      for (const p of it.params) params.set(p.name, parseTy(p.ty));
+      const order: { name: string; ty: Type }[] = [];
+      for (const p of it.params) {
+        const pty = parseTy(p.ty);
+        params.set(p.name, pty);
+        order.push({ name: p.name, ty: pty });
+      }
       fnParams.set(it.name, params);
+      fnParamOrder.set(it.name, order);
     }
+  }
+
+  // FIX A: Build implMethods table — structName -> Set<methodName>
+  // This is used to verify that a gated method name on a user struct is
+  // actually implemented by that struct, preventing the LIE-9 bypass where
+  // a capability value is passed under a struct-typed parameter and the
+  // gate treats it as "user struct, no capability, allow."
+  const implMethods = new Map<string, Set<string>>();
+  for (const it of items) {
+    if (it.n === "Impl") {
+      if (!implMethods.has(it.name)) implMethods.set(it.name, new Set());
+      const methods = implMethods.get(it.name)!;
+      for (const m of it.methods) {
+        if (m && m.n === "Fn") methods.add(m.name);
+      }
+    }
+  }
+
+  // FIX B: typesCompatible — check if an argument type is compatible with
+  // a declared parameter type. This is the core soundness check that was
+  // missing. Key rule: a cap-family type is NOT compatible with a struct
+  // type (closes LIE-9/SQL-INJECTION-FULL/CMD-INJECTION-FULL/NET-FETCH-FULL).
+  function typesCompatible(argTy: Type, paramTy: Type): boolean {
+    // "other" (unknown/inferred) is compatible with anything — don't break
+    // untyped code that has nothing to do with capabilities.
+    if (argTy.k === "other" || paramTy.k === "other") return true;
+    // Cap-family types are only compatible with cap-family types.
+    // A Cap value cannot be passed to a struct-typed parameter (LIE-9).
+    if (argTy.k === "cap" && paramTy.k === "struct") return false;
+    if (argTy.k === "struct" && paramTy.k === "cap") return false;
+    if (argTy.k === "cap" && paramTy.k === "cap") {
+      // Cap is compatible with Cap<anything> (bare cap provides all modules).
+      // Cap<fs> is compatible with Cap<fs> but NOT with Cap<net>.
+      if (paramTy.module === null) return true; // param: Cap accepts any Cap<X>
+      if (argTy.module === null) return true; // arg: Cap (bare) satisfies any Cap<X> param
+      return argTy.module === paramTy.module;
+    }
+    // Struct-to-struct: names must match (no subtyping in Aegis).
+    if (argTy.k === "struct" && paramTy.k === "struct") {
+      return argTy.name === paramTy.name;
+    }
+    // Array compatibility
+    if (argTy.k === "array" && paramTy.k === "array") {
+      return typesCompatible(argTy.elem, paramTy.elem);
+    }
+    // Map compatibility
+    if (argTy.k === "map" && paramTy.k === "map") {
+      return typesCompatible(argTy.val, paramTy.val);
+    }
+    // Option compatibility
+    if (argTy.k === "option" && paramTy.k === "option") {
+      return typesCompatible(argTy.inner, paramTy.inner);
+    }
+    // Different type families
+    if (argTy.k !== paramTy.k) return false;
+    return true;
   }
 
   // 4. Type-check each function body
@@ -903,39 +983,46 @@ function typeCheck(items: Item[]): Diag[] {
       ctx.set(pname, pty);
       ownScope.add(pname);
     }
-    walkStmts(it.body, ctx, ownScope);
+    walkStmts(it.body, ctx, ownScope, 0);
   }
 
   // 5. Type-check top-level non-fn/struct/impl items
   for (const it of items) {
     if (it.n === "Fn" || it.n === "Struct" || it.n === "Impl") continue;
-    walkStmt(it, new Map(), new Set());
+    walkStmt(it, new Map(), new Set(), 0);
   }
 
   return diags;
 
-  // --- Walking functions ---
-  function walkStmts(stmts: Stmt[], ctx: Map<string, Type>, ownScope: Set<string>) {
-    for (const s of stmts) walkStmt(s, ctx, ownScope);
+  // --- Walking functions (with depth tracking — P1 fix) ---
+  function walkStmts(stmts: Stmt[], ctx: Map<string, Type>, ownScope: Set<string>, depth: number) {
+    if (depth > 256) return;
+    for (const s of stmts) walkStmt(s, ctx, ownScope, depth);
   }
 
-  function walkStmt(s: Stmt, ctx: Map<string, Type>, ownScope: Set<string>) {
+  function walkStmt(s: Stmt, ctx: Map<string, Type>, ownScope: Set<string>, depth: number) {
+    if (depth > 256) return;
     if (s.n === "Let") {
-      walkExpr(s.expr, ctx, ownScope);
-      const ty = inferType(s.expr, ctx, sft, fnRet, { d: 0, max: 256 });
-      ctx.set(s.name, ty);
+      // P2 fix: null-check before inferType
+      if (s.expr) {
+        walkExpr(s.expr, ctx, ownScope, depth);
+        const ty = inferType(s.expr, ctx, sft, fnRet, { d: 0, max: 256 });
+        ctx.set(s.name, ty);
+      }
       ownScope.add(s.name);
     } else if (s.n === "Assign") {
-      walkExpr(s.expr, ctx, ownScope);
-      if (!ownScope.has(s.name)) {
-        diags.push({ kind: "error", phase: "check", line: s.line, col: 0, msg: `Cannot assign to captured variable '${s.name}'. Closures capture by value; mutation of captured variables is not supported.` });
+      if (s.expr) {
+        walkExpr(s.expr, ctx, ownScope, depth);
+        if (!ownScope.has(s.name)) {
+          diags.push({ kind: "error", phase: "check", line: s.line, col: 0, msg: `Cannot assign to captured variable '${s.name}'. Closures capture by value; mutation of captured variables is not supported.` });
+        }
+        const ty = inferType(s.expr, ctx, sft, fnRet, { d: 0, max: 256 });
+        ctx.set(s.name, ty);
       }
-      const ty = inferType(s.expr, ctx, sft, fnRet, { d: 0, max: 256 });
-      ctx.set(s.name, ty);
     } else if (s.n === "Expr") {
-      walkExpr(s.expr, ctx, ownScope);
+      if (s.expr) walkExpr(s.expr, ctx, ownScope, depth);
     } else if (s.n === "Return") {
-      if (s.expr) walkExpr(s.expr, ctx, ownScope);
+      if (s.expr) walkExpr(s.expr, ctx, ownScope, depth);
     } else if (s.n === "Fn") {
       const nestedCtx = new Map(ctx);
       const nestedOwn = new Set<string>();
@@ -945,36 +1032,49 @@ function typeCheck(items: Item[]): Diag[] {
         nestedOwn.add(p.name);
       }
       if (s.ret) fnRet.set(s.name, parseTy(s.ret));
-      walkStmts(s.body, nestedCtx, nestedOwn);
+      walkStmts(s.body, nestedCtx, nestedOwn, depth + 1);
     } else if (s.n === "ForIn") {
-      walkExpr(s.iter, ctx, ownScope);
+      if (s.iter) walkExpr(s.iter, ctx, ownScope, depth);
       const nestedCtx = new Map(ctx);
       nestedCtx.set(s.var, { k: "other" });
       const nestedOwn = new Set(ownScope);
       nestedOwn.add(s.var);
-      walkStmts(s.body, nestedCtx, nestedOwn);
+      walkStmts(s.body, nestedCtx, nestedOwn, depth + 1);
     }
   }
 
-  function walkExpr(e: Expr, ctx: Map<string, Type>, ownScope: Set<string>) {
-    if (!e) return;
+  function walkExpr(e: Expr, ctx: Map<string, Type>, ownScope: Set<string>, depth: number) {
+    if (!e || depth > 256) return;
     switch (e.n) {
-      case "Bin": walkExpr(e.l, ctx, ownScope); walkExpr(e.r, ctx, ownScope); break;
-      case "Unary": walkExpr(e.e, ctx, ownScope); break;
+      case "Bin": walkExpr(e.l, ctx, ownScope, depth + 1); walkExpr(e.r, ctx, ownScope, depth + 1); break;
+      case "Unary": walkExpr(e.e, ctx, ownScope, depth + 1); break;
       case "Call":
-        walkExpr(e.callee, ctx, ownScope);
-        for (const a of e.args) walkExpr(a, ctx, ownScope);
+        walkExpr(e.callee, ctx, ownScope, depth + 1);
+        // FIX B: Check argument types against declared parameter types
+        if (e.callee.n === "Ident" && fnParamOrder.has(e.callee.name)) {
+          const params = fnParamOrder.get(e.callee.name)!;
+          for (let i = 0; i < e.args.length && i < params.length; i++) {
+            const argTy = inferType(e.args[i], ctx, sft, fnRet, { d: 0, max: 256 });
+            const paramTy = params[i].ty;
+            if (!typesCompatible(argTy, paramTy)) {
+              diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: `Type error in call to '${e.callee.name}': parameter '${params[i].name}' expects ${formatType(paramTy)} but got ${formatType(argTy)}. A capability value cannot be passed as a non-capability parameter (type confusion).` });
+            }
+          }
+        }
+        for (const a of e.args) walkExpr(a, ctx, ownScope, depth + 1);
         break;
       case "Method":
-        walkExpr(e.recv, ctx, ownScope);
+        walkExpr(e.recv, ctx, ownScope, depth + 1);
         {
           // THE GATE: check if the receiver's TYPE provides the required capability.
           //
           // Design:
           // - If receiver type contains Cap: enforce module match (Cap<fs> for read, etc.)
-          // - If receiver type is a known user struct (no Cap): allow — it's a user method
-          // - If receiver type is "other" (unknown/untyped): REJECT — unknown types can't
-          //   provide capabilities, and gated method names are reserved for capability modules
+          // - If receiver type is a known user struct (no Cap): check implMethods
+          //   (FIX A) — only allow if the struct actually implements the method.
+          //   This prevents passing a capability under a struct-typed parameter
+          //   and treating it as "user struct, no capability, allow."
+          // - If receiver type is "other" (unknown/untyped): REJECT.
           const recvTy = inferType(e.recv, ctx, sft, fnRet, { d: 0, max: 256 });
           const requiredModule = GATED_METHOD_MODULE[e.name];
           if (requiredModule) {
@@ -1009,31 +1109,39 @@ function typeCheck(items: Item[]): Diag[] {
                   }
                 }
               }
-            } else if (!recvIsUserStruct) {
+            } else if (recvIsUserStruct) {
+              // FIX A: The receiver is a user struct. Before allowing a gated
+              // method name, verify the struct actually implements it.
+              // Without this check, a capability value passed under a struct-typed
+              // parameter would bypass the gate (LIE-9 bypass).
+              const methods = implMethods.get(recvTy.name);
+              if (!methods || !methods.has(e.name)) {
+                diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: `Method '${e.name}' is not defined on struct '${recvTy.name}'. Gated method names (read, fetch, run, query) on a struct without a matching impl are rejected — this prevents type confusion where a capability is passed as a struct.` });
+              }
+            } else {
               // Receiver is unknown/untyped and not a user struct — reject.
               // Gated method names are reserved for capability modules.
               diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: `Method '${e.name}' requires receiver of type Cap<${requiredModule}>. The receiver has no capability type and is not a known user struct — no ambient authority.` });
             }
-            // If recvIsUserStruct: allow (user-defined method, not a capability method)
           }
         }
-        for (const a of e.args) walkExpr(a, ctx, ownScope);
+        for (const a of e.args) walkExpr(a, ctx, ownScope, depth + 1);
         break;
-      case "Field": walkExpr(e.recv, ctx, ownScope); break;
-      case "Index": walkExpr(e.arr, ctx, ownScope); walkExpr(e.idx, ctx, ownScope); break;
-      case "Array": for (const el of e.elems) walkExpr(el, ctx, ownScope); break;
-      case "MapLit": for (const p of e.pairs) walkExpr(p.val, ctx, ownScope); break;
-      case "If": walkExpr(e.cond, ctx, ownScope); walkStmts(e.then, ctx, ownScope); if (e.els) walkStmts(e.els, ctx, ownScope); break;
-      case "Match": walkExpr(e.scrut, ctx, ownScope); for (const a of e.arms) walkStmts(a.body, new Map(ctx), new Set(ownScope)); break;
-      case "Block": walkStmts(e.body, ctx, ownScope); break;
-      case "Try": walkExpr(e.e, ctx, ownScope); break;
-      case "Some": case "Ok": case "Err": walkExpr(e.e, ctx, ownScope); break;
+      case "Field": walkExpr(e.recv, ctx, ownScope, depth + 1); break;
+      case "Index": walkExpr(e.arr, ctx, ownScope, depth + 1); walkExpr(e.idx, ctx, ownScope, depth + 1); break;
+      case "Array": for (const el of e.elems) walkExpr(el, ctx, ownScope, depth + 1); break;
+      case "MapLit": for (const p of e.pairs) walkExpr(p.val, ctx, ownScope, depth + 1); break;
+      case "If": walkExpr(e.cond, ctx, ownScope, depth + 1); walkStmts(e.then, ctx, ownScope, depth + 1); if (e.els) walkStmts(e.els, ctx, ownScope, depth + 1); break;
+      case "Match": walkExpr(e.scrut, ctx, ownScope, depth + 1); for (const a of e.arms) walkStmts(a.body, new Map(ctx), new Set(ownScope), depth + 1); break;
+      case "Block": walkStmts(e.body, ctx, ownScope, depth + 1); break;
+      case "Try": walkExpr(e.e, ctx, ownScope, depth + 1); break;
+      case "Some": case "Ok": case "Err": walkExpr(e.e, ctx, ownScope, depth + 1); break;
       case "StructLit":
         // Reject forged Module/Env/TaskHandle structs (defense in depth)
         if (e.name === "Module" || e.name === "Env" || e.name === "TaskHandle") {
           diags.push({ kind: "error", phase: "check", line: e.line, col: 0, msg: `Cannot construct a forged '${e.name}' value. Capability modules are only available through the 'env' parameter passed to main.` });
         }
-        for (const f of e.fields) walkExpr(f.val, ctx, ownScope);
+        for (const f of e.fields) walkExpr(f.val, ctx, ownScope, depth + 1);
         break;
       case "Closure": {
         // Closures capture the current ctx (capability flows through capture).
@@ -1044,7 +1152,7 @@ function typeCheck(items: Item[]): Diag[] {
           cCtx.set(p, { k: "other" });
           cOwn.add(p);
         }
-        walkStmts(e.body, cCtx, cOwn);
+        walkStmts(e.body, cCtx, cOwn, depth + 1);
         break;
       }
       case "StrLit": {
@@ -1054,12 +1162,24 @@ function typeCheck(items: Item[]): Diag[] {
             const { toks } = tokenize(part.expr);
             const pp = new Parser(toks);
             const inner = pp.parseExpr();
-            if (inner) walkExpr(inner, ctx, ownScope);
+            if (inner) walkExpr(inner, ctx, ownScope, depth + 1);
             for (const d of pp.diags) diags.push(d);
           }
         }
         break;
       }
+    }
+  }
+
+  // Format a Type for error messages
+  function formatType(t: Type): string {
+    switch (t.k) {
+      case "cap": return t.module ? `Cap<${t.module}>` : "Cap";
+      case "struct": return t.name;
+      case "array": return `Array<${formatType(t.elem)}>`;
+      case "map": return `Map<${formatType(t.val)}>`;
+      case "option": return `Option<${formatType(t.inner)}>`;
+      case "other": return "unknown";
     }
   }
 }

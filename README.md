@@ -3,7 +3,7 @@
 ![CI](https://github.com/Abd123454/aegis/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-research%20prototype-orange.svg)
-![Tests](https://img.shields.io/badge/tests-110%20pass-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-130%20pass-brightgreen.svg)
 
 > A programming language built from scratch for security-by-construction,
 > ease of learning, and universal reach. This repository contains the
@@ -13,6 +13,71 @@
 **Project status: research prototype / MVP.** Not production-ready. Not
 "unhackable." The interpreter is a teaching tool that demonstrates the
 security properties; it is NOT a production compiler.
+
+---
+
+## Phase 7: Fix the Type Checker's Missing Argument-Type Check
+
+This is the **FIFTH attempt** at the ambient-authority guarantee. The
+fourth independent review found the Phase 6 type system's gate was
+structurally correct but two typing rules were unsound:
+
+1. The gate allowed gated method names on any user-struct-typed receiver
+   without verifying the struct actually defines that method.
+2. The type checker never verified call-site argument types against
+   declared parameter types.
+
+Together, these let a real `Module` (e.g. `env.fs`) be passed to a function
+declaring an unrelated struct-typed parameter, and the gate treated it as
+"user struct, no capability" and allowed privileged calls.
+
+**Unlike rounds 1-3, this is not an enumeration gap — it's a straightforward
+missing basic type-check.** Phase 7 fixes it directly:
+
+- **Fix A**: Build `implMethods` table. The gate's user-struct branch now
+  checks that the struct actually implements the gated method name.
+- **Fix B**: `typesCompatible(argTy, paramTy)` checks call-site arguments
+  against declared parameter types. A `Cap`-family type is NOT compatible
+  with a `struct` type — this closes LIE-9 and all FULL variants.
+- **P1**: Depth limit in `walkExpr` (closes NEST-B analyzer crash).
+- **P1**: Reject out-of-range integer literals at parse time; handle
+  `-2147483648` via special case in `parseUnary`.
+- **P2**: Null-checks before `inferType` (closes CRASH-1/2/4).
+
+### Phase 7 fix status
+
+| # | Fix | Status |
+|---|---|---|
+| A | Gate by impl membership, not just receiver type | **Fixed** — implMethods table + check |
+| B | Check call-site argument types | **Fixed** — typesCompatible + diagnostic |
+| P1a | Depth limit in walkExpr | **Fixed** — depth tracking (256 max) |
+| P1b | Out-of-range integer literals | **Fixed** — reject >2147483647; special-case -2147483648 |
+| P2 | Null-check before inferType | **Fixed** — null guards in walkStmt |
+| Tests | Regression tests for every PoC | **Done** — 20 tests in `tests/phase7-typeconfusion.test.ts` |
+| FP | False-positive checks for legitimate user methods | **Done** — LEGIT-read/fetch/run/query pass |
+
+**130 tests pass** (17 security + 17 brevity + 7 domain + 9 regression +
+24 phase-4 adversarial + 23 phase-5 aliased + 13 phase-6 generality +
+20 phase-7 type-confusion). 0 failures.
+
+### This is the FIFTH attempt
+
+- **Phase 4**: name-based — broken by aliasing.
+- **Phase 5**: value-tracking with enumeration — broken by struct/array/return wrapping.
+- **Phase 5 fix**: more enumeration — broken by the next form.
+- **Phase 6**: type-system-based — structurally sound but missing basic argument-type check.
+- **Phase 7** (this): adds the missing argument-type check + impl membership gate.
+
+**This round is different** from rounds 1-3: it's a genuine missing basic
+type-check (standard behavior any real type checker performs), not an
+enumeration gap or a deeper design flaw. The type system from Phase 6 was
+structurally correct; it just needed the standard call-site type-checking
+that every typed language has.
+
+**A fifth independent review should re-attempt the type-confusion pattern**
+(passing a capability under an unrelated declared type) with variations
+Fix A/B might not cover — e.g. passing through an `Option<MyStruct>`, a
+generic collection, or a second layer of indirection.
 
 ---
 

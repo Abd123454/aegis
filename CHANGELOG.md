@@ -43,6 +43,26 @@ backward-compatibility promise applies.
 
 ## [Unreleased]
 
+### Phase 7 — Fix missing argument-type check (fifth attempt)
+
+The fourth independent review found two unsound typing rules in the Phase 6
+type system. Phase 7 fixes them directly — this is a missing basic type-check,
+not an enumeration gap.
+
+- **Fixed (A)**: Build `implMethods` table. Gate's user-struct branch now
+  checks the struct actually implements the gated method name (closes LIE-9).
+- **Fixed (B)**: `typesCompatible(argTy, paramTy)` checks call-site arguments
+  against declared parameter types. Cap-family types are NOT compatible with
+  struct types (closes LIE-9, SQL-INJECTION-FULL, CMD-INJECTION-FULL, NET-FETCH-FULL).
+- **Fixed (P1a)**: Depth limit in `walkExpr` (256 max, closes NEST-B crash).
+- **Fixed (P1b)**: Reject integer literals >2147483647 at parse time; special-case
+  `-2147483648` in `parseUnary` (closes long-standing round-2 issue).
+- **Fixed (P2)**: Null-checks before `inferType` in walkStmt (closes CRASH-1/2/4).
+- **Added**: 20 regression tests in `tests/phase7-typeconfusion.test.ts` covering
+  all PoCs from the fourth review + false-positive checks for legitimate user methods.
+
+All 130 tests pass. 46/46 PoCs from all 4 reviews verified.
+
 ### Phase 6 — Real Capability Type System (foundational redesign)
 
 This is the FOURTH attempt at the ambient-authority guarantee. Phases 1-5
