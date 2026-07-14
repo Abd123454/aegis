@@ -1,0 +1,10 @@
+// AI helper — ask a question and get a response
+async fn ask_ai(env: Cap, question: String) -> String {
+    let response = await env.ai.complete(question)?
+    response
+}
+
+fn main(env: Cap) {
+    let answer = ask_ai(env, "What is 2+2?")
+    print("AI says: {answer}")
+}

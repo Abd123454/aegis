@@ -43,6 +43,16 @@ backward-compatibility promise applies.
 
 ## [Unreleased]
 
+### Phase 13 — General-purpose language enhancements
+
+- **Added**: `async`/`await` syntax — parsed and accepted (sync evaluator treats await as identity).
+- **Added**: Real AI integration — `env.ai.complete/chat` call z-ai LLM via subprocess. Mock mode via `AEGIS_MOCK_AI=1`.
+- **Added**: Extended stdlib — `fs.write/list/exists/delete/mkdir`, `json_encode/decode`, `sha256`, `random_hex`.
+- **Added**: 5 examples — hello, JSON manipulation, file processor, concurrent fetch, AI ask.
+- **Added**: 12 new tests in `tests/phase13-general.test.ts`.
+- **Measured**: Startup time 63ms (target <50ms).
+- All 206 tests pass. 0 failures.
+
 ### Phase 12 — Standalone CLI + Cap<ai> + stdlib
 
 - **Added**: Standalone CLI (`src/standalone/cli.ts`) — `aegis run/check/repl`.

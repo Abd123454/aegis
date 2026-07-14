@@ -1,0 +1,21 @@
+// File processor — read, transform, write
+fn main(env: Cap) {
+    // Read a file (mock returns "[file contents]")
+    let content = env.fs.read("input.txt")?
+    print("Read: {content}")
+
+    // Process content
+    let lines = content.split(" ")
+    print("Words: {lines.len()}")
+
+    // Write output
+    env.fs.write("output.txt", "processed")?
+    print("Written output.txt")
+
+    // List directory
+    let files = env.fs.list(".")?
+    print("Files: {files}")
+
+    // Check existence
+    print("Exists: {env.fs.exists("output.txt")}")
+}

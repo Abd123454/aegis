@@ -1,0 +1,4 @@
+// Hello World — simplest Aegis program
+fn main() {
+    print("Hello, Aegis!")
+}

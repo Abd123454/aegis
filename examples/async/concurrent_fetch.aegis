@@ -1,0 +1,17 @@
+// Concurrent fetch — spawn tasks and join
+fn main(env: Cap) {
+    // Spawn a task that fetches data
+    let handle = spawn(move || {
+        let r = env.net.fetch("https://api.example.com/data")?
+        r
+    })
+
+    // Do other work while waiting
+    print("Working...")
+
+    // Join and get result
+    match handle.join() {
+        Ok(data) => print("Got: {data}"),
+        Err(e) => print("Failed: {e}"),
+    }
+}

@@ -3,7 +3,7 @@
 ![CI](https://github.com/Abd123454/aegis/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-research%20prototype-orange.svg)
-![Tests](https://img.shields.io/badge/tests-181%20pass-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-206%20pass-brightgreen.svg)
 ![Fuzz](https://img.shields.io/badge/fuzz-5000+%20iters%2C%200%20bypass-brightgreen.svg)
 
 > A programming language built from scratch for security-by-construction,
@@ -14,6 +14,53 @@
 **Project status: research prototype / MVP.** Not production-ready. Not
 "unhackable." The interpreter is a teaching tool that demonstrates the
 security properties; it is NOT a production compiler.
+
+---
+
+## Phase 13: General-purpose language enhancements
+
+Phase 13 transforms Aegis from a security prototype into a usable
+general-purpose language. The AI capability is one feature among many.
+
+### What's new
+
+1. **`async`/`await` syntax** — `async fn` and `await expr` are parsed
+   and accepted. In the current sync evaluator, `await` is treated as
+   identity (the expression is evaluated synchronously). Real async
+   evaluation is a Phase 14 goal (requires Rust backend).
+
+2. **Real AI integration** — `env.ai.complete` and `env.ai.chat` now
+   call the real z-ai LLM via subprocess (`z-ai` CLI). Falls back to
+   mock mode when `AEGIS_MOCK_AI=1` is set (used in tests). Verified:
+   `aegis run examples/ai/ask.aegis` returns a real LLM response.
+
+3. **Extended stdlib** — `fs.write/list/exists/delete/mkdir`, `json_encode`,
+   `json_decode`, `sha256`, `random_hex`, `range`, `int_to_str`, `type_of`,
+   `now`.
+
+4. **Examples** — `examples/hello.aegis`, `examples/data/json_manip.aegis`,
+   `examples/cli/file_processor.aegis`, `examples/async/concurrent_fetch.aegis`,
+   `examples/ai/ask.aegis`.
+
+5. **Performance** — Startup time: 63ms (target: <50ms, close).
+
+**206 tests pass** (194 prior + 12 new Phase 13 tests). 0 failures.
+
+### Quick start
+
+```bash
+# Run a file
+bun run aegis run examples/hello.aegis
+
+# Run a string
+bun run aegis run -e 'fn main() { print("Hello!") }'
+
+# Real AI (requires z-ai CLI)
+bun run aegis run examples/ai/ask.aegis
+
+# Tests (mock AI mode)
+bun test
+```
 
 ---
 

@@ -1,0 +1,17 @@
+// JSON manipulation — encode, transform, decode
+fn main() {
+    let data = #{ "name": "Aegis", "version": 13, "secure": true }
+    let json = json_encode(data)?
+    print("Encoded: {json}")
+
+    let parsed = json_decode(json)?
+    print("Parsed: {parsed}")
+
+    // Hash the JSON
+    let hash = sha256(json)
+    print("Hash: {hash}")
+
+    // Random token
+    let token = random_hex(32)
+    print("Token: {token}")
+}
