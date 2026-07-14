@@ -59,7 +59,7 @@ describe("Domain: word statistics tool (FULLY WORKING)", () => {
 describe("Domain: ETL pipeline shape", () => {
   test("ETL with fs.read + map/filter/reduce compiles and runs", async () => {
     const r = await run(`fn main(env: Cap) {
-      let raw = env.fs.read("sales.csv")?
+      let raw = env.fs.read("tests/fixtures/test.txt")?
       let lines = raw.split("\\n").filter(|l| l.len() > 0)
       print("lines: {lines.len()}")
     }`.replace(/\\\\n/g, "\\n"));

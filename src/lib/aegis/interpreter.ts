@@ -172,14 +172,16 @@ function tokenize(src: string): { toks: Tok[]; diags: Diag[] } {
       push(KEYWORDS.has(id) ? id : "ident", id);
       continue;
     }
+    if (c === "*") { push("star", "*"); i++; col++; continue; }
+    if (c === "#") { push("#", "#"); i++; col++; continue; }
+    // Phase 16 FIX 1: Check two-char operators BEFORE single-char & check.
+    // This ensures && is tokenized as the logical-and operator, not two forbidden & tokens.
+    const two = src.slice(i, i + 2);
+    if (["=>","==","!=","<=",">=","->","&&","||","|>","::"].includes(two)) { push(two, two); i += 2; col += 2; continue; }
     if (c === "&") {
       diags.push({ kind: "error", phase: "parse", line, col, msg: "Raw references (`&`) are not in the safe subset. Use borrowed values via the ownership system, not raw pointers — eliminates pointer-aliasing bugs." });
       push("forbidden", "&"); i++; col++; continue;
     }
-    if (c === "*") { push("star", "*"); i++; col++; continue; }
-    if (c === "#") { push("#", "#"); i++; col++; continue; }
-    const two = src.slice(i, i + 2);
-    if (["=>","==","!=","<=",">=","->","&&","||","|>","::"].includes(two)) { push(two, two); i += 2; col += 2; continue; }
     if (c === "|") { push("|", "|"); i++; col++; continue; }
     if ("+-/%(){}[],:;=<>?.".includes(c)) { push(c, c); i++; col++; continue; }
     diags.push({ kind: "error", phase: "parse", line, col, msg: `Unexpected character '${c}'.` });
@@ -1539,7 +1541,21 @@ export async function run(source: string, _grantCaps: string[] = ["fs", "net", "
     if (fnVal.name === "int_to_str") return { k: "str", v: String((args[0] as any).v) };
     if (fnVal.name === "str_to_int") { const n = parseInt((args[0] as any).v, 10); return isNaN(n) ? { k: "err", v: { k: "str", v: "not a valid integer" } } : { k: "int", v: n }; }
     if (fnVal.name === "float_to_str") return { k: "str", v: String((args[0] as any).v) };
-    if (fnVal.name === "range") { const n = (args[0] as any).v; const arr: Val[] = []; for (let i = 0; i < n; i++) arr.push({ k: "int", v: i }); return { k: "array", v: arr }; }
+    if (fnVal.name === "range") {
+      // Phase 16 FIX 2: range(n), range(start, end), range(start, end, step)
+      const arr: Val[] = [];
+      if (args.length === 1) {
+        const n = (args[0] as any).v; for (let i = 0; i < n; i++) arr.push({ k: "int", v: i });
+      } else if (args.length === 2) {
+        const start = (args[0] as any).v, end = (args[1] as any).v;
+        for (let i = start; i < end; i++) arr.push({ k: "int", v: i });
+      } else if (args.length === 3) {
+        const start = (args[0] as any).v, end = (args[1] as any).v, step = (args[2] as any).v;
+        if (step > 0) { for (let i = start; i < end; i += step) arr.push({ k: "int", v: i }); }
+        else if (step < 0) { for (let i = start; i > end; i += step) arr.push({ k: "int", v: i }); }
+      }
+      return { k: "array", v: arr };
+    }
     if (fnVal.name === "now") return { k: "int", v: Math.floor(Date.now() / 1000) };
     if (fnVal.name === "type_of") { const a = args[0]; const tn: Record<string,string> = {int:"Int",float:"Float",str:"String",bool:"Bool",array:"Array",map:"Map",unit:"Unit",some:"Option",none:"Option",ok:"Result",err:"Result",struct:"Struct",fn:"Fn",cap:"Cap"}; return { k: "str", v: tn[a.k] || a.k }; }
     if (fnVal.name === "json_encode") return { k: "ok", v: { k: "str", v: JSON.stringify(valToJSON(args[0])) } };
@@ -1608,12 +1624,73 @@ export async function run(source: string, _grantCaps: string[] = ["fs", "net", "
   async function evalMethod(e: Extract<Expr, { n: "Method" }>, env: Env): Promise<Val> {
     const recv = await evalExpr(e.recv, env);
     if (recv.k === "struct" && recv.name === "Module") { const mod = recv.fields.__mod.v as string; const cap = recv.fields.__cap; if (!cap || cap.k !== "cap" || cap.label !== mod + ":" + sessionSecret) throw new EvalErr(`Runtime backstop: Module '${mod}' invalid capability tag.`, e.line, e.col);
-      if (mod === "fs" && e.name === "read") return { k: "ok", v: { k: "str", v: "[file contents]" } };
-      if (mod === "fs" && e.name === "write") { if (e.args.length !== 2) throw new EvalErr("fs.write requires (path, content).", e.line, e.col); return { k: "ok", v: { k: "unit" } }; }
-      if (mod === "fs" && e.name === "list") { if (e.args.length !== 1) throw new EvalErr("fs.list requires (dir).", e.line, e.col); return { k: "ok", v: { k: "array", v: [{ k: "str", v: "file1.txt" }, { k: "str", v: "file2.txt" }] } }; }
-      if (mod === "fs" && e.name === "exists") { if (e.args.length !== 1) throw new EvalErr("fs.exists requires (path).", e.line, e.col); return { k: "bool", v: true }; }
-      if (mod === "fs" && e.name === "delete") { if (e.args.length !== 1) throw new EvalErr("fs.delete requires (path).", e.line, e.col); return { k: "ok", v: { k: "unit" } }; }
-      if (mod === "fs" && e.name === "mkdir") { if (e.args.length !== 1) throw new EvalErr("fs.mkdir requires (path).", e.line, e.col); return { k: "ok", v: { k: "unit" } }; }
+      // Phase 16 FIX 3: Real I/O via Bun APIs (replaces mock implementations)
+      if (mod === "fs" && e.name === "read") {
+        if (e.args.length < 1) throw new EvalErr("fs.read requires (path).", e.line, e.col);
+        const pathVal = await evalExpr(e.args[0], env);
+        const path = (pathVal as any).v as string;
+        // Path safety: restrict to cwd + subdirectories
+        const resolved = require("path").resolve(path);
+        const cwd = process.cwd();
+        if (!resolved.startsWith(cwd)) throw new EvalErr(`Path '${path}' escapes working directory. Aegis restricts file access to cwd and subdirectories.`, e.line, e.col);
+        try {
+          const content = await Bun.file(resolved).text();
+          return { k: "ok", v: { k: "str", v: content } };
+        } catch { return { k: "err", v: { k: "str", v: "cannot read file: " + path } }; }
+      }
+      if (mod === "fs" && e.name === "write") {
+        if (e.args.length !== 2) throw new EvalErr("fs.write requires (path, content).", e.line, e.col);
+        const pathVal = await evalExpr(e.args[0], env);
+        const contentVal = await evalExpr(e.args[1], env);
+        const path = (pathVal as any).v as string;
+        const content = (contentVal as any).v as string;
+        const resolved = require("path").resolve(path);
+        const cwd = process.cwd();
+        if (!resolved.startsWith(cwd)) throw new EvalErr(`Path '${path}' escapes working directory.`, e.line, e.col);
+        await Bun.write(resolved, content);
+        return { k: "ok", v: { k: "unit" } };
+      }
+      if (mod === "fs" && e.name === "list") {
+        if (e.args.length !== 1) throw new EvalErr("fs.list requires (dir).", e.line, e.col);
+        const pathVal = await evalExpr(e.args[0], env);
+        const dir = (pathVal as any).v as string;
+        const resolved = require("path").resolve(dir);
+        const cwd = process.cwd();
+        if (!resolved.startsWith(cwd)) throw new EvalErr(`Path '${dir}' escapes working directory.`, e.line, e.col);
+        try {
+          const entries = require("fs").readdirSync(resolved);
+          return { k: "ok", v: { k: "array", v: entries.map((s: string) => ({ k: "str", v: s })) } };
+        } catch { return { k: "err", v: { k: "str", v: "cannot list directory: " + dir } }; }
+      }
+      if (mod === "fs" && e.name === "exists") {
+        if (e.args.length !== 1) throw new EvalErr("fs.exists requires (path).", e.line, e.col);
+        const pathVal = await evalExpr(e.args[0], env);
+        const path = (pathVal as any).v as string;
+        const resolved = require("path").resolve(path);
+        const cwd = process.cwd();
+        if (!resolved.startsWith(cwd)) return { k: "bool", v: false };
+        return { k: "bool", v: require("fs").existsSync(resolved) };
+      }
+      if (mod === "fs" && e.name === "delete") {
+        if (e.args.length !== 1) throw new EvalErr("fs.delete requires (path).", e.line, e.col);
+        const pathVal = await evalExpr(e.args[0], env);
+        const path = (pathVal as any).v as string;
+        const resolved = require("path").resolve(path);
+        const cwd = process.cwd();
+        if (!resolved.startsWith(cwd)) throw new EvalErr(`Path '${path}' escapes working directory.`, e.line, e.col);
+        try { require("fs").unlinkSync(resolved); return { k: "ok", v: { k: "unit" } }; }
+        catch { try { require("fs").rmdirSync(resolved); return { k: "ok", v: { k: "unit" } }; } catch { return { k: "err", v: { k: "str", v: "cannot delete: " + path } }; } }
+      }
+      if (mod === "fs" && e.name === "mkdir") {
+        if (e.args.length !== 1) throw new EvalErr("fs.mkdir requires (path).", e.line, e.col);
+        const pathVal = await evalExpr(e.args[0], env);
+        const path = (pathVal as any).v as string;
+        const resolved = require("path").resolve(path);
+        const cwd = process.cwd();
+        if (!resolved.startsWith(cwd)) throw new EvalErr(`Path '${path}' escapes working directory.`, e.line, e.col);
+        require("fs").mkdirSync(resolved, { recursive: true });
+        return { k: "ok", v: { k: "unit" } };
+      }
       if (mod === "net" && e.name === "fetch") return { k: "ok", v: { k: "str", v: "[network response]" } };
       if (mod === "net" && e.name === "post") { if (e.args.length < 2) throw new EvalErr("net.post requires (url, body).", e.line, e.col); return { k: "ok", v: { k: "str", v: "[posted]" } }; }
       // Phase 15 FIX 1: HTTP server

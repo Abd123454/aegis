@@ -100,7 +100,7 @@ describe("Phase 12: Extended fs stdlib", () => {
       print(files)
     }`);
     expect(r.ok).toBe(true);
-    expect(r.output[0]).toContain("file1.txt");
+    expect(r.output[0]).toContain("README"); // real files from cwd
   });
 
   test("FS-3: fs.exists works with Cap", async () => {

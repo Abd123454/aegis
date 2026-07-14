@@ -123,7 +123,7 @@ describe("Phase 9: Implicit return — legitimate cases still work", () => {
   // Implicit return of Cap from a function that received Cap
   test("IMPL-RET-CAP: implicit return of Cap<fs> works", async () => {
     const r = await run(`fn get_fs(env: Cap) -> Cap<fs> { env.fs }
-    fn main(env: Cap) { let fs = get_fs(env); fs.read("x")? }`);
+    fn main(env: Cap) { let fs = get_fs(env); fs.read("tests/fixtures/test.txt")? }`);
     expect(r.ok).toBe(true);
   });
 });

@@ -36,14 +36,14 @@ describe("Phase 5: Ambient authority — aliased variants (AMBIENT-A/B/C)", () =
   test("AMBIENT-C: function receives cap via param named 'alias' — allowed when cap flows", async () => {
     // This should SUCCEED: the capability flows through the alias.
     // The fix tracks VALUES not names, so `alias` IS cap-tagged when env is passed.
-    const r = await run(`fn helper(alias: Cap) { alias.fs.read("test.txt")? }
+    const r = await run(`fn helper(alias: Cap) { alias.fs.read("tests/fixtures/test.txt")? }
     fn main(env: Cap) { helper(env)? }`);
     expect(r.ok).toBe(true);
   });
 
   // AMBIENT-D: same function called WITHOUT cap — must be rejected
   test("AMBIENT-D: same function called without cap — rejected", async () => {
-    const r = await run(`fn helper(alias) { alias.fs.read("test.txt") }
+    const r = await run(`fn helper(alias) { alias.fs.read("tests/fixtures/test.txt") }
     fn main() { helper("not a cap") }`);
     expect(r.ok).toBe(false);
   });
@@ -214,7 +214,7 @@ describe("Phase 5: Forged Module with extracted cap (RUNTIME BACKSTOP)", () => {
     // analyzer were bypassed, the runtime would catch it.
     // We test that a legitimately-obtained module works:
     const r = await run(`fn main(env: Cap) {
-      let content = env.fs.read("test.txt")?
+      let content = env.fs.read("tests/fixtures/test.txt")?
       print(content)
     }`);
     expect(r.ok).toBe(true);
@@ -226,7 +226,7 @@ describe("Phase 5: Interprocedural capability flow", () => {
   test("Cap flows through 3 function calls", async () => {
     const r = await run(`fn a(env: Cap) { b(env) }
     fn b(env: Cap) { c(env) }
-    fn c(env: Cap) { env.fs.read("test")? }
+    fn c(env: Cap) { env.fs.read("tests/fixtures/test.txt")? }
     fn main(env: Cap) { a(env)? }`);
     expect(r.ok).toBe(true);
   });
@@ -238,21 +238,21 @@ describe("Phase 5: Interprocedural capability flow", () => {
   // requirements explicitly. This is structurally different from Phase 5's
   // interprocedural fixpoint, which was defeated by the third review.
   test("Cap does NOT flow through untyped param — requires explicit annotation", async () => {
-    const r = await run(`fn helper(x) { x.fs.read("test")? }
+    const r = await run(`fn helper(x) { x.fs.read("tests/fixtures/test.txt")? }
     fn main(env: Cap) { helper(env)? }`);
     expect(r.ok).toBe(false);
   });
 
   // But DOES flow through an explicitly Cap-typed param
   test("Cap flows through explicitly Cap-typed param", async () => {
-    const r = await run(`fn helper(x: Cap) { x.fs.read("test")? }
+    const r = await run(`fn helper(x: Cap) { x.fs.read("tests/fixtures/test.txt")? }
     fn main(env: Cap) { helper(env)? }`);
     expect(r.ok).toBe(true);
   });
 
   // Same function rejected when non-cap is passed
   test("Same function rejected when non-cap is passed", async () => {
-    const r = await run(`fn helper(x) { x.fs.read("test") }
+    const r = await run(`fn helper(x) { x.fs.read("tests/fixtures/test.txt") }
     fn main() { helper("not a cap") }`);
     expect(r.ok).toBe(false);
   });

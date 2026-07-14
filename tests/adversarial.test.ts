@@ -264,7 +264,7 @@ describe("Adversarial review — Cap<fs> type parsing (T1)", () => {
   // env.read(...), NOT env.fs.read(...) (that's for bare Cap which has .fs field).
   test("T1: Cap<fs> parameter grants capability for direct read()", async () => {
     const r = await run(`fn main(env: Cap<fs>) {
-      let content = env.read("test.txt")?
+      let content = env.read("tests/fixtures/test.txt")?
       print(content)
     }`);
     expect(r.ok).toBe(true);

@@ -16,7 +16,7 @@ describe("Phase 6: Generality — capability in struct field", () => {
   // Capability wrapped in a user struct, accessed via field
   test("STRESS-1: cap in struct field, accessed via field chain", async () => {
     const r = await run(`struct Holder { cap: Cap }
-    fn f(h: Holder) { h.cap.fs.read("x")? }
+    fn f(h: Holder) { h.cap.fs.read("tests/fixtures/test.txt")? }
     fn main(env: Cap) { f(Holder { cap: env })? }`);
     expect(r.ok).toBe(true);
   });
@@ -24,7 +24,7 @@ describe("Phase 6: Generality — capability in struct field", () => {
   // Same struct but function has no Cap parameter — must be rejected
   test("STRESS-1b: struct containing Cap passed to function without Cap param", async () => {
     const r = await run(`struct Holder { cap: Cap }
-    fn sneaky(h) { h.cap.fs.read("x") }
+    fn sneaky(h) { h.cap.fs.read("tests/fixtures/test.txt") }
     fn main() { sneaky(Holder { cap: "not env" }) }`);
     expect(r.ok).toBe(false);
   });
@@ -33,7 +33,7 @@ describe("Phase 6: Generality — capability in struct field", () => {
 describe("Phase 6: Generality — capability in array", () => {
   // Capability stored in array, accessed via index
   test("STRESS-2: cap in array element, accessed via index", async () => {
-    const r = await run(`fn f(arr) { arr[0]?.fs.read("x")? }
+    const r = await run(`fn f(arr) { arr[0]?.fs.read("tests/fixtures/test.txt")? }
     fn main(env: Cap) { f([env])? }`);
     // arr[0] is Option<Cap> (array of Cap). ? unwraps it. Then .fs.read().
     // The type system handles this through general array indexing rules.
@@ -42,7 +42,7 @@ describe("Phase 6: Generality — capability in array", () => {
 
   // Same with typed param
   test("STRESS-2b: cap in array with typed param", async () => {
-    const r = await run(`fn f(arr: Array<Cap>) { arr[0]?.fs.read("x")? }
+    const r = await run(`fn f(arr: Array<Cap>) { arr[0]?.fs.read("tests/fixtures/test.txt")? }
     fn main(env: Cap) { f([env])? }`);
     // Array<Cap> is not recognized by current parseTy (returns "other").
     // This is a known limitation — documented in parseTy.
@@ -60,7 +60,7 @@ describe("Phase 6: Generality — capability captured by closure in struct", () 
   test("STRESS-3: closure capturing cap, stored in struct — type check passes", async () => {
     const r = await run(`struct Box { f: fn }
     fn main(env: Cap) {
-        let b = Box { f: || { env.fs.read("x")? } }
+        let b = Box { f: || { env.fs.read("tests/fixtures/test.txt")? } }
         b.f()
     }`);
     // Type check should pass (no check-phase errors)
@@ -76,7 +76,7 @@ describe("Phase 6: Generality — capability through function return", () => {
     const r = await run(`fn get_fs(env: Cap) -> Cap<fs> { env.fs }
     fn main(env: Cap) {
         let fs = get_fs(env)
-        fs.read("x")?
+        fs.read("tests/fixtures/test.txt")?
     }`);
     expect(r.ok).toBe(true);
   });
@@ -86,7 +86,7 @@ describe("Phase 6: Generality — capability through function return", () => {
     const r = await run(`fn get_fs(env: Cap) -> Cap<fs> { env.fs }
     fn main() {
         let fs = get_fs("not env")
-        fs.read("x")
+        fs.read("tests/fixtures/test.txt")
     }`);
     expect(r.ok).toBe(false);
   });
@@ -102,7 +102,7 @@ describe("Phase 6: Generality — capability through multiple indirections", () 
     const r = await run(`struct Wrapper { items: Array<Cap> }
     fn main(env: Cap) {
         let w = Wrapper { items: [env] }
-        w.items[0]?.fs.read("x")?
+        w.items[0]?.fs.read("tests/fixtures/test.txt")?
     }`);
     // Array<Cap> is parsed as "other", so w.items is "other", w.items[0] is
     // "other", and .read() on "other" is rejected. This is the correct

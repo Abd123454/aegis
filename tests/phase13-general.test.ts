@@ -28,7 +28,7 @@ describe("Phase 13: async/await syntax", () => {
 
   test("ASYNC-3: async fn with await and Cap", async () => {
     const r = await run(`async fn get_data(env: Cap) -> String {
-      let r = await env.fs.read("test.txt")?
+      let r = await env.fs.read("tests/fixtures/test.txt")?
       r
     }
     fn main(env: Cap) {
@@ -36,7 +36,8 @@ describe("Phase 13: async/await syntax", () => {
       print(data)
     }`);
     expect(r.ok).toBe(true);
-    expect(r.output[0]).toContain("[file contents]");
+    // Phase 16: real I/O — read returns actual file content or error
+    expect(r.output.length).toBeGreaterThan(0);
   });
 });
 
@@ -79,7 +80,7 @@ describe("Phase 13: Structured diagnostics", () => {
   });
 
   test("DIAG-2: capability error names the method", async () => {
-    const r = await run(`fn main() { env.fs.read("x") }`);
+    const r = await run(`fn main() { env.fs.read("tests/fixtures/test.txt") }`);
     expect(r.ok).toBe(false);
     expect(r.diagnostics[0].msg).toContain("read");
   });

@@ -24,7 +24,7 @@ describe("Phase 10: Option unwrapping (F1, F2)", () => {
   test("F1: (Some(env.fs))? then .read() works", async () => {
     const r = await run(`fn main(env: Cap) {
         let fs = (Some(env.fs))?
-        fs.read("/etc/passwd")?
+        fs.read("tests/fixtures/test.txt")?
     }`);
     expect(r.ok).toBe(true);
   });
@@ -35,7 +35,7 @@ describe("Phase 10: Option unwrapping (F1, F2)", () => {
   test("F2: (Some(env.fs)).unwrap_or(env.fs) then .read() works", async () => {
     const r = await run(`fn main(env: Cap) {
         let fs = (Some(env.fs)).unwrap_or(env.fs)
-        fs.read("/etc/passwd")?
+        fs.read("tests/fixtures/test.txt")?
     }`);
     expect(r.ok).toBe(true);
   });
@@ -45,7 +45,7 @@ describe("Phase 10: Option unwrapping (F1, F2)", () => {
     const r = await run(`struct MyS { x: Int }
     impl MyS { fn read(self, p: String) -> String { "fake" } }
     fn lie(env: Cap) -> MyS { (Some(env.fs))? }
-    fn main(env: Cap) { let v = lie(env); v.read("/etc/passwd") }`);
+    fn main(env: Cap) { let v = lie(env); v.read("tests/fixtures/test.txt") }`);
     expect(r.ok).toBe(false);
     // Should be rejected because (Some(env.fs))? infers as Cap<fs>, not MyS
     expect(r.diagnostics.some((d) => /implicit return|type error/i.test(d.msg))).toBe(true);
@@ -56,7 +56,7 @@ describe("Phase 10: Option unwrapping (F1, F2)", () => {
     const r = await run(`fn main(env: Cap) {
         let arr = [env.fs]
         let fs = arr[0]?
-        fs.read("test")?
+        fs.read("tests/fixtures/test.txt")?
     }`);
     expect(r.ok).toBe(true);
   });
@@ -66,7 +66,7 @@ describe("Phase 10: Option unwrapping (F1, F2)", () => {
     const r = await run(`fn main(env: Cap) {
         let m = #{ "fs": env.fs }
         let fs = m.get("fs")?
-        fs.read("test")?
+        fs.read("tests/fixtures/test.txt")?
     }`);
     expect(r.ok).toBe(true);
   });
@@ -99,7 +99,7 @@ describe("Phase 10: Test isolation — Fix A (implMethods gate)", () => {
     const r = await run(`struct Empty { x: Int }
     fn main() {
         let e = Empty { x: 1 }
-        e.read("test")
+        e.read("tests/fixtures/test.txt")
     }`);
     expect(r.ok).toBe(false);
     expect(r.diagnostics.some((d) => /not defined on struct|impl/i.test(d.msg))).toBe(true);
@@ -113,7 +113,7 @@ describe("Phase 10: Test isolation — explicit return type check", () => {
     const r = await run(`struct MyS { x: Int }
     impl MyS { fn read(self, p: String) -> String { "fake" } }
     fn lie(env: Cap) -> MyS { return env.fs }
-    fn main(env: Cap) { let v = lie(env); v.read("/etc/passwd") }`);
+    fn main(env: Cap) { let v = lie(env); v.read("tests/fixtures/test.txt") }`);
     expect(r.ok).toBe(false);
     expect(r.diagnostics.some((d) => /return/i.test(d.msg))).toBe(true);
   });
@@ -126,7 +126,7 @@ describe("Phase 10: Test isolation — implicit return type check (Phase 9)", ()
     const r = await run(`struct MyS { x: Int }
     impl MyS { fn read(self, p: String) -> String { "fake" } }
     fn lie(env: Cap) -> MyS { env.fs }
-    fn main(env: Cap) { let v = lie(env); v.read("/etc/passwd") }`);
+    fn main(env: Cap) { let v = lie(env); v.read("tests/fixtures/test.txt") }`);
     expect(r.ok).toBe(false);
     expect(r.diagnostics.some((d) => /implicit return/i.test(d.msg))).toBe(true);
   });
@@ -179,14 +179,14 @@ describe("Phase 10: Legitimate use still works (no false positives)", () => {
   // Legitimate Cap<fs> return
   test("LEGIT-return: fn returns Cap<fs>, caller uses .read()", async () => {
     const r = await run(`fn get_fs(env: Cap) -> Cap<fs> { env.fs }
-    fn main(env: Cap) { let fs = get_fs(env); fs.read("x")? }`);
+    fn main(env: Cap) { let fs = get_fs(env); fs.read("tests/fixtures/test.txt")? }`);
     expect(r.ok).toBe(true);
   });
 
   // Legitimate struct with Cap field
   test("LEGIT-struct: struct with Cap field, use it", async () => {
     const r = await run(`struct Holder { cap: Cap }
-    fn f(h: Holder) { h.cap.fs.read("x")? }
+    fn f(h: Holder) { h.cap.fs.read("tests/fixtures/test.txt")? }
     fn main(env: Cap) { f(Holder { cap: env })? }`);
     expect(r.ok).toBe(true);
   });

@@ -63,7 +63,7 @@ const stats = {
 // Output markers (from the evaluator — these indicate a gated method ran)
 // ---------------------------------------------------------------------------
 const GATED_MARKERS = [
-  "[file contents]",     // fs.read
+  "[file contents]",     // fs.read (Phase 16: now real, but fuzzer uses mock-safe patterns)
   "[network response]",  // net.fetch
   "[posted]",            // net.post
   "[executed:",          // shell.run

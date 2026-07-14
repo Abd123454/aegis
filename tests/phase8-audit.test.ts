@@ -36,7 +36,7 @@ describe("Phase 8: Round 5 PoCs — return-type bypass", () => {
   // This is the CORRECT usage — should succeed
   test("LIE-fs-legitimate: return Cap<fs> and use it", async () => {
     const r = await run(`fn get_fs(env: Cap) -> Cap<fs> { env.fs }
-    fn main(env: Cap) { let fs = get_fs(env); fs.read("x")? }`);
+    fn main(env: Cap) { let fs = get_fs(env); fs.read("tests/fixtures/test.txt")? }`);
     expect(r.ok).toBe(true);
   });
 
@@ -115,7 +115,7 @@ describe("Phase 8: Struct field type lie (Site 3)", () => {
     const r = await run(`struct Holder { cap: Cap }
     fn main(env: Cap) {
         let h = Holder { cap: env }
-        h.cap.fs.read("test")?
+        h.cap.fs.read("tests/fixtures/test.txt")?
     }`);
     expect(r.ok).toBe(true);
   });
@@ -136,7 +136,7 @@ describe("Phase 8: Typed let binding lie (Site 4)", () => {
   test("LET-OK: declare let as Cap, assign env", async () => {
     const r = await run(`fn main(env: Cap) {
         let x: Cap = env
-        x.fs.read("test")?
+        x.fs.read("tests/fixtures/test.txt")?
     }`);
     expect(r.ok).toBe(true);
   });
@@ -196,7 +196,7 @@ describe("Phase 8: Impl method return type lie (Site 6)", () => {
     fn main(env: Cap) {
         let w = Wrapper { env: env }
         let fs = w.get_fs()
-        fs.read("test")?
+        fs.read("tests/fixtures/test.txt")?
     }`);
     expect(r.ok).toBe(true);
   });
@@ -227,7 +227,7 @@ describe("Phase 8: Re-verify round-5 non-findings", () => {
   // Closure capturing cap — should still work
   test("CLOSURE-cap: closure captures env, uses it", async () => {
     const r = await run(`fn main(env: Cap) {
-        let f = || { env.fs.read("test")? }
+        let f = || { env.fs.read("tests/fixtures/test.txt")? }
         f()
     }`);
     expect(r.ok).toBe(true);

@@ -51,7 +51,7 @@ describe("Regression: 5 canonical programs", () => {
 
   test("read file + parse untrusted input", async () => {
     const r = await run(`fn main(env: Cap) {
-      let content = env.fs.read("data.json")?
+      let content = env.fs.read("tests/fixtures/test.txt")?
       let n = content.parse_int()
       match n {
         Some(v) => print("Number: {v}"),
