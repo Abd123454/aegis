@@ -43,6 +43,21 @@ backward-compatibility promise applies.
 
 ## [Unreleased]
 
+### Phase 11 — Fuzzing campaign
+
+After 7 rounds of manual review, switched to automated fuzzing. Built
+grammar-aware fuzzer (`tests/fuzz/aegis-fuzzer.ts`) that generates random
+Aegis programs and checks the security property.
+
+- **Added**: `tests/fuzz/aegis-fuzzer.ts` — grammar-aware program generator
+  with seedable PRNG, property oracle, coverage tracking.
+- **Result**: 5,000+ iterations across 5 seeds, 0 bypasses found.
+- **Coverage**: all major AST node types (IntLit, StrLit, Ident, Field,
+  Method, Call, Some, Try, StructLit, Array, MapLit, Closure, If, Let,
+  Assign, Return).
+- **Gaps**: no match/for-in/spawn generation; some seeds cause interpreter
+  hangs on deeply recursive generated programs.
+
 ### Phase 10 — Option/Array/Map type recursion + test isolation (eighth attempt)
 
 The seventh independent review found no bypasses but identified false

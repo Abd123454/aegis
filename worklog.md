@@ -363,3 +363,22 @@ Stage Summary:
 - Key results: 3 false positives fixed (Option unwrapping, unwrap_or, get/first/last type inference). 14 isolation tests added. No bypasses opened — bypass check confirms fn lie() -> MyS { (Some(env.fs))? } still rejected.
 - 8th independent reviewer: brief should be very short since no bypass was found in round 7. Focus on whether the new type inference for builtin methods (unwrap_or/get/first/last) could be exploited — e.g., does inferring Cap<fs> for unwrap_or create a way to launder a capability through a type that should be rejected?
 - Reservations: The operator precedence issue (Some(x)? = Some((x)?)) is a known limitation. Fixing it would require changing parsePrimary for Some/Ok/Err to not use parsePostfix, which could break other things. Documented instead of fixed.
+
+---
+Task ID: 11-phase
+Agent: programmer-subagent
+Task: Phase 11 — build grammar-aware fuzzer + run fuzzing campaign.
+
+Work Log:
+- Read worklog Phase 9 + Phase 10. Read interpreter.ts: run() signature, GATED_METHOD_MODULE, evaluator output markers.
+- Built tests/fuzz/aegis-fuzzer.ts with: mulberry32 PRNG, grammar-aware generator (structs, impls, helpers, main with/without Cap), property oracle (output marker detection), coverage tracking, CLI args (--iterations, --timeout, --seed).
+- Sanity check: verified oracle catches known bypass pattern (main without Cap calling env.fs.read) and correctly identifies legitimate gated execution (main with Cap). Both passed.
+- Ran campaign: 5000+ iterations across 5 seeds (42, 99, 100, 200, 300). ~750 programs ran successfully, ~4250 rejected. ~75 gated method executions — ALL with Cap param (legitimate). 0 bypasses found.
+- Coverage: all major AST node types generated (IntLit, StrLit, Ident, Field, Method, Call, Some, Try, StructLit, Array, MapLit, Closure, If, Let, Assign, Return).
+- Commit SHA: 9595bb2. Pushed to GitHub (0360316..9595bb2 main -> main).
+
+Stage Summary:
+- Result: NO BYPASS FOUND. 5000+ iterations, 0 bypasses.
+- Stats: ~750 ok, ~4250 rejected, ~75 gated executions (all legitimate), 0 bypasses.
+- Known gaps: (1) no match/for-in/spawn generation — future coverage targets. (2) Some seeds cause interpreter hangs on deeply recursive generated programs — fuzzer uses timeout to handle. (3) Total iterations limited by hang issue — would need per-program timeout for larger campaigns.
+- Recommendation: the fuzzer complements but does not replace manual review. Future work: add match/for-in/spawn to generator, add per-program execution timeout, run longer campaigns.
