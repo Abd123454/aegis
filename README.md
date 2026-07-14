@@ -1,6 +1,6 @@
 # Aegis
 
-![CI](https://github.com/AEGIS-LANG/aegis/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/Abd123454/aegis/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-research%20prototype-orange.svg)
 
@@ -55,7 +55,7 @@ repository**, which was authored by a single agent. Specifically:
 - ❌ **No formal proof** of the security properties exists (design intent only).
 - ❌ **The test suite is single-agent-authored** — the same agent wrote the
   interpreter and the tests. This is a real bias, not dishonesty.
-- ✅ **The only independent check** is [CI](https://github.com/AEGIS-LANG/aegis/actions):
+- ✅ **The only independent check** is [CI](https://github.com/Abd123454/aegis/actions):
   GitHub Actions runs the full test suite on every push and pull request.
   If CI passes, the tests pass on a clean machine — but the tests themselves
   are still self-authored.
