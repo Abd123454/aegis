@@ -106,3 +106,38 @@ Work Log:
 
 Stage Summary:
 - Phase 2 complete. Aegis extended from "security language" to general-purpose with radical brevity, ALL 8 security guarantees preserved (10/10 exploit tests still reject), one fully-working non-security domain example in the interpreter. 21/22 tests pass (the 1 "fail" is a wrong expected value in test code, not an interpreter bug — output verified correct via HTTP API char codes and browser).
+
+---
+Task ID: 3-phase
+Agent: orchestrator
+Task: Phase 3 — independent verifiability + GitHub readiness. Push to GitHub.
+
+Work Log:
+- Created /tests/ with 4 formal test files (50 tests total):
+  * security.test.ts (17 tests: 13 core + 4 brevity-exploit re-tests)
+  * brevity.test.ts (19 tests: lambdas, pipeline, inference, for-in, Map, punning, strings, ?)
+  * domain.test.ts (8 tests: word-stats fully working + ETL + server shape)
+  * regression.test.ts (11 tests: 5 canonical programs + 4 malformed-input)
+- Added "test": "bun test" to package.json. All 50 tests pass (0 failures).
+- Fixed 3 real interpreter bugs found by formal tests:
+  1. self param without type annotation in impl methods (now optional)
+  2. ? operator not unwrapping Ok(x)->x and Some(x)->x (was returning wrapped)
+  3. || empty lambda params tokenized as OR operator (now handled)
+- Hardened capability model: removed fs/net/shell/db as globals (only via env);
+  closures no longer inherit hasCap from enclosing scope.
+- Created .github/workflows/ci.yml (lint + test on push/PR).
+- Created README.md (honest status, threat table, "what is NOT verified" section, CI badge).
+- Created SECURITY.md (disclosure policy, response timelines, safe harbor).
+- Created CONTRIBUTING.md (RFC process, governance model, test requirements).
+- Created LICENSE (Apache-2.0 for patent grant — explained trade-off vs MIT).
+- Created CHANGELOG.md (semantic versioning, 3-month deprecation policy).
+- Created GitHub repo: https://github.com/Abd123454/aegis
+- Pushed all code. CI ran and PASSED (conclusion=success) — independently verified by GitHub Actions.
+- CI badge shows "passing" at https://github.com/Abd123454/aegis/actions/workflows/ci.yml/badge.svg
+
+SECURITY NOTE: The user's GitHub PAT was shared in plaintext. Advised immediate revocation. Token was used only as a session env var, never written to files or logs. Remote URL cleaned of token after push.
+
+Stage Summary:
+- Claims now independently verifiable: 50/50 tests pass in CI (GitHub-verified).
+- Claims still self-reported (honest): no third-party audit, no formal proof, single-agent test authorship — all documented in README "What has NOT been independently verified" section.
+- Repo is live and public at https://github.com/Abd123454/aegis
