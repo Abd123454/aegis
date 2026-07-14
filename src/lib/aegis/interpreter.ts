@@ -75,7 +75,7 @@ type Tok = { t: string; v: string; line: number; col: number };
 const KEYWORDS = new Set([
   "fn","let","mut","if","else","match","return","struct","impl",
   "spawn","move","true","false","Ok","Err","Some","None","print",
-  "loop","break","for","in","as","Cap","continue",
+  "loop","break","for","in","as","Cap","continue","while",
   "async","await",  // Phase 13: async/await syntax
 ]);
 
@@ -228,7 +228,8 @@ type Stmt =
   | { n: "Struct"; name: string; fields: { name: string; ty: string }[] }
   | { n: "Impl"; name: string; methods: any[] }
   | { n: "ForIn"; var: string; iter: Expr; body: Stmt[]; line: number }
-  | { n: "Assign"; name: string; expr: Expr; line: number };
+  | { n: "Assign"; name: string; expr: Expr; line: number }
+  | { n: "While"; cond: Expr; body: Stmt[]; line: number };
 
 type Item = Stmt;
 
@@ -291,6 +292,7 @@ class Parser {
     if (t.t === "impl") return this.parseImpl();
     if (t.t === "let") { const s = this.parseLet(); return s; }
     if (t.t === "for") { const s = this.parseFor(); return s; }
+    if (t.t === "while") { const s = this.parseWhile(); return s; }
     if (t.t === "forbidden") { this.next(); return null; }
     const e = this.parseExpr();
     if (e) { this.eat(";"); return { n: "Expr", expr: e } as Item; }
@@ -390,6 +392,13 @@ class Parser {
     const body = this.parseBlock();
     return { n: "ForIn", var: v, iter: iter!, body, line };
   }
+  parseWhile(): Stmt {
+    const line = this.peek().line;
+    this.eat("while");
+    const cond = this.parseExpr();
+    const body = this.parseBlock();
+    return { n: "While", cond: cond!, body, line };
+  }
   parseBlock(): Stmt[] {
     if (!this.enterDepth("block")) {
       // Depth exceeded — consume the block to avoid infinite loop.
@@ -408,6 +417,7 @@ class Parser {
     while (!this.check("}") && !this.check("eof")) {
       if (this.check("let")) { body.push(this.parseLet()); continue; }
       if (this.check("for")) { body.push(this.parseFor()); continue; }
+      if (this.check("while")) { body.push(this.parseWhile()); continue; }
       // assignment: `ident = expr`  (not `==`, not a field assign — local rebinding only)
       if (this.peek().t === "ident" && this.peek(1).t === "=") {
         const line = this.peek().line;
@@ -425,6 +435,21 @@ class Parser {
         if (!this.check(";") && !this.check("}")) expr = this.parseExpr();
         this.eat(";");
         body.push({ n: "Return", expr, line });
+        continue;
+      }
+      // Phase 17 FIX 6: break and continue statements
+      if (this.check("break")) {
+        const line = this.peek().line;
+        this.eat("break");
+        this.eat(";");
+        body.push({ n: "Expr", expr: { n: "Call", callee: { n: "Ident", name: "__break__", line, col: 0 }, args: [], line, col: 0 } } as any);
+        continue;
+      }
+      if (this.check("continue")) {
+        const line = this.peek().line;
+        this.eat("continue");
+        this.eat(";");
+        body.push({ n: "Expr", expr: { n: "Call", callee: { n: "Ident", name: "__continue__", line, col: 0 }, args: [], line, col: 0 } } as any);
         continue;
       }
       if (this.check("{")) { const b = this.parseBlock(); body.push({ n: "Expr", expr: { n: "Block", body: b } }); continue; }
@@ -1180,11 +1205,21 @@ function typeCheck(items: Item[]): Diag[] {
     } else if (s.n === "Assign") {
       if (s.expr) {
         walkExpr(s.expr, ctx, ownScope, depth, declaredRet, fnName);
-        if (!ownScope.has(s.name)) {
-          diags.push({ kind: "error", phase: "check", line: s.line, col: 0, msg: `Cannot assign to captured variable '${s.name}'. Closures capture by value; mutation of captured variables is not supported.` });
+        // Phase 17 FIX 4: Type-safe reassignment — check type compatibility
+        const newTy = inferType(s.expr, ctx, sft, fnRet, { d: 0, max: 256 });
+        const currentTy = ctx.get(s.name);
+        if (currentTy) {
+          // Phase 17 FIX 4: Stricter check for assignment.
+          // cap types are NOT compatible with non-cap types (including "other").
+          // This prevents assigning a capability to a non-cap variable.
+          if (newTy.k === "cap" && currentTy.k !== "cap") {
+            diags.push({ kind: "error", phase: "check", line: s.line, col: 0, msg: `Type error: cannot assign ${formatType(newTy)} to variable '${s.name}' of type ${formatType(currentTy)}.` });
+          }
+          if (currentTy.k === "cap" && newTy.k !== "cap" && newTy.k !== "other") {
+            diags.push({ kind: "error", phase: "check", line: s.line, col: 0, msg: `Type error: cannot assign ${formatType(newTy)} to variable '${s.name}' of type ${formatType(currentTy)}.` });
+          }
         }
-        const ty = inferType(s.expr, ctx, sft, fnRet, { d: 0, max: 256 });
-        ctx.set(s.name, ty);
+        ctx.set(s.name, currentTy || newTy);
       }
     } else if (s.n === "Expr") {
       if (s.expr) walkExpr(s.expr, ctx, ownScope, depth, declaredRet, fnName);
@@ -1226,6 +1261,10 @@ function typeCheck(items: Item[]): Diag[] {
       const nestedOwn = new Set(ownScope);
       nestedOwn.add(s.var);
       walkStmts(s.body, nestedCtx, nestedOwn, depth + 1, declaredRet, fnName);
+    } else if (s.n === "While") {
+      // Phase 17 FIX 6: While loop type checking
+      walkExpr(s.cond, ctx, ownScope, depth, declaredRet, fnName);
+      walkStmts(s.body, ctx, ownScope, depth + 1, declaredRet, fnName);
     }
   }
 
@@ -1409,7 +1448,8 @@ function typeCheck(items: Item[]): Diag[] {
 // ---------------------------------------------------------------------------
 class ReturnSignal { constructor(public val: Val) {} }
 class TrySignal { constructor(public val: Val) {} }
-class BreakSignal {} 
+class BreakSignal {}
+class ContinueSignal {}
 class EvalErr extends Error { constructor(public msg: string, public line: number, public col: number) { super(msg); } }
 
 function valToStr(v: Val, depth = 0): string {
@@ -1562,7 +1602,10 @@ export async function run(source: string, _grantCaps: string[] = ["fs", "net", "
     if (fnVal.name === "json_decode") { try { return { k: "ok", v: jsonToVal(JSON.parse((args[0] as any).v)) }; } catch { return { k: "err", v: { k: "str", v: "invalid JSON" } }; } }
     if (fnVal.name === "sha256") { const s = (args[0] as any).v as string; let h = 0; for (let i = 0; i < s.length; i++) { h = ((h<<5)-h)+s.charCodeAt(i); h|=0; } return { k: "str", v: Math.abs(h).toString(16).padStart(8,"0") }; }
     if (fnVal.name === "random_hex") { const n = (args[0] as any).v as number; let hex = ""; for (let i = 0; i < n; i++) hex += Math.floor(Math.random()*16).toString(16); return { k: "str", v: hex }; }
-    const local: Env = new Map(fnVal.closure);
+    // Phase 17 FIX 5: For closures, share the SAME env (by reference) so
+    // mut variables in the enclosing scope are visible and mutable.
+    // For named functions, closure is globals (shared by default).
+    const local: Env = fnVal.name === "<closure>" ? fnVal.closure : new Map(fnVal.closure);
     for (let i = 0; i < fnVal.params.length; i++) local.set(fnVal.params[i], args[i]);
     try { return await execBlock(fnVal.body, local); } catch (sig) { if (sig instanceof ReturnSignal) return sig.val; if (sig instanceof TrySignal) return sig.val; throw sig; }
   };
@@ -1613,9 +1656,50 @@ export async function run(source: string, _grantCaps: string[] = ["fs", "net", "
   }
   async function evalMatch(e: Extract<Expr, { n: "Match" }>, env: Env): Promise<Val> { const v = await evalExpr(e.scrut, env); for (const arm of e.arms) { const m = matchPat(arm.pat, v); if (m !== null) { const local = new Map(env); for (const b of arm.binds) local.set(b, m); return await execBlock(arm.body, local); } } throw new EvalErr("Non-exhaustive match.", 0, 0); }
   function matchPat(pat: string, v: Val): Val | null { if (pat === "_") return { k: "unit" }; if (pat === "None" && v.k === "none") return { k: "unit" }; if (pat === "Some" && v.k === "some") return v.v; if (pat === "Ok" && v.k === "ok") return v.v; if (pat === "Err" && v.k === "err") return v.v; const m = pat.match(/^(\w+)\((\w+)\)$/); if (m) { if (m[1] === "Some" && v.k === "some") return v.v; if (m[1] === "Ok" && v.k === "ok") return v.v; if (m[1] === "Err" && v.k === "err") return v.v; } if (/^-?\d+$/.test(pat) && v.k === "int" && v.v === parseInt(pat, 10)) return { k: "unit" }; if (pat.startsWith('"') && v.k === "str" && v.v === pat.slice(1, -1)) return { k: "unit" }; if (v.k === "bool" && (pat === "true" || pat === "false") && v.v === (pat === "true")) return { k: "unit" }; return null; }
-  async function execBlock(stmts: Stmt[], env: Env): Promise<Val> { let last: Val = { k: "unit" }; for (const s of stmts) { if (s.n === "Let") { const v = await evalExpr(s.expr, env); env.set(s.name, v); last = { k: "unit" }; } else if (s.n === "Assign") { const v = await evalExpr(s.expr, env); env.set(s.name, v); last = { k: "unit" }; } else if (s.n === "Expr") { last = await evalExpr(s.expr, env); } else if (s.n === "Return") { throw new ReturnSignal(s.expr ? await evalExpr(s.expr, env) : { k: "unit" }); } else if (s.n === "Fn") { env.set(s.name, { k: "fn", name: s.name, params: s.params.map((p) => p.name), body: s.body, closure: env, caps: s.hasCap }); } else if (s.n === "ForIn") { const iter = await evalExpr(s.iter, env); if (iter.k !== "array") throw new EvalErr("`for` expects an iterable (array).", s.line, 0); for (const el of iter.v) { env.set(s.var, el); try { await execBlock(s.body, env); } catch (sig) { if (sig instanceof BreakSignal) break; throw sig; } } last = { k: "unit" }; } } return last; }
+  async function execBlock(stmts: Stmt[], env: Env): Promise<Val> {
+    let last: Val = { k: "unit" };
+    for (const s of stmts) {
+      if (s.n === "Let") { const v = await evalExpr(s.expr, env); env.set(s.name, v); last = { k: "unit" }; }
+      else if (s.n === "Assign") { const v = await evalExpr(s.expr, env); env.set(s.name, v); last = { k: "unit" }; }
+      else if (s.n === "Expr") { last = await evalExpr(s.expr, env); }
+      else if (s.n === "Return") { throw new ReturnSignal(s.expr ? await evalExpr(s.expr, env) : { k: "unit" }); }
+      else if (s.n === "Fn") { env.set(s.name, { k: "fn", name: s.name, params: s.params.map((p) => p.name), body: s.body, closure: env, caps: s.hasCap }); }
+      else if (s.n === "ForIn") {
+        const iter = await evalExpr(s.iter, env);
+        if (iter.k !== "array") throw new EvalErr("`for` expects an iterable (array).", s.line, 0);
+        for (const el of iter.v) {
+          env.set(s.var, el);
+          try { await execBlock(s.body, env); }
+          catch (sig) { if (sig instanceof BreakSignal) break; if (sig instanceof ContinueSignal) continue; throw sig; }
+        }
+        last = { k: "unit" };
+      }
+      else if (s.n === "While") {
+        // Phase 17 FIX 6: While loop with iteration limit
+        let iterations = 0;
+        const MAX_ITERATIONS = 1000000;
+        while (true) {
+          const cond = await evalExpr(s.cond, env);
+          if (cond.k !== "bool") throw new EvalErr("`while` condition must be Bool.", s.line, 0);
+          if (!cond.v) break;
+          if (++iterations > MAX_ITERATIONS) throw new EvalErr(`While loop exceeded ${MAX_ITERATIONS} iterations — possible infinite loop.`, s.line, 0);
+          try { await execBlock(s.body, env); }
+          catch (sig) {
+            if (sig instanceof BreakSignal) break;
+            if (sig instanceof ContinueSignal) continue;
+            throw sig;
+          }
+        }
+        last = { k: "unit" };
+      }
+    }
+    return last;
+  }
   async function evalCall(e: Extract<Expr, { n: "Call" }>, env: Env): Promise<Val> {
     if (e.callee.n === "Ident" && e.callee.name === "print") { const args = await Promise.all(e.args.map((a) => evalExpr(a, env))); output.push(args.map((a) => valToStr(a)).join(" ")); return { k: "unit" }; }
+    // Phase 17 FIX 6: break and continue as internal calls
+    if (e.callee.n === "Ident" && e.callee.name === "__break__") { throw new BreakSignal(); }
+    if (e.callee.n === "Ident" && e.callee.name === "__continue__") { throw new ContinueSignal(); }
     if (e.callee.n === "Ident" && e.callee.name === "__spawn__") { const clos = e.args[0] as any; if (!clos || clos.n !== "Closure") throw new EvalErr("spawn expects a closure.", 0, 0); const local = new Map(env); const result = await execBlock(clos.body, local); return { k: "struct", name: "TaskHandle", fields: { result, __done: { k: "bool", v: true } } }; }
     if (e.callee.n === "Ident" && e.callee.name === "__assoc__") { const typeName = (e.args[0] as any)?.name; const methodName = (e as any).__assocName; if (typeName && impls.has(typeName)) { const m = impls.get(typeName)!.get(methodName); if (m) { const local: Env = new Map(globals); const callArgs = await Promise.all(e.args.slice(1).map((a) => evalExpr(a, env))); let ai = 0; for (const p of m.params) { if (p.name === "self") continue; local.set(p.name, callArgs[ai]); ai++; } try { return await execBlock(m.body, local); } catch (sig) { if (sig instanceof ReturnSignal) return sig.val; if (sig instanceof TrySignal) return sig.val; throw sig; } } } throw new EvalErr(`No associated function '${methodName}' on '${typeName}'.`, e.line, e.col); }
     if (e.callee.n === "Ident" && ["len","sqrt","int_to_str","str_to_int","float_to_str","range","now","type_of","json_encode","json_decode","sha256","random_hex"].includes(e.callee.name)) { const args = await Promise.all(e.args.map((a) => evalExpr(a, env))); return applyFn(globals.get(e.callee.name)!, args); }
@@ -1785,6 +1869,6 @@ export async function run(source: string, _grantCaps: string[] = ["fs", "net", "
   try {
     for (const it of items) { if (it.n === "Fn" || it.n === "Struct" || it.n === "Impl") continue; if (it.n === "Let") { const v = await evalExpr(it.expr, globals); globals.set(it.name, v); } else if (it.n === "Expr") await evalExpr(it.expr, globals); else if (it.n === "ForIn") { const iter = await evalExpr(it.iter, globals); if (iter.k === "array") for (const el of iter.v) { const local = new Map(globals); local.set(it.var, el); await execBlock(it.body, local); } } }
     if (globals.has("main")) { const mainFn = globals.get("main")!; if (mainFn.k === "fn") { const local: Env = new Map(globals); if (mainFn.params.length >= 1) { const mainItem = items.find((it) => it.n === "Fn" && it.name === "main") as Extract<Item, { n: "Fn" }> | undefined; if (mainItem && mainItem.params.length >= 1) { const pty = mainItem.params[0].ty; if (pty === "Cap") local.set(mainFn.params[0], envObj); else if (pty.startsWith("Cap<") && pty.endsWith(">")) local.set(mainFn.params[0], makeModule(pty.slice(4, -1))); } } try { await execBlock(mainFn.body, local); } catch (sig) { if (!(sig instanceof ReturnSignal)) throw sig; } } }
-  } catch (err: any) { if (err instanceof EvalErr) { diagnostics.push({ kind: "error", phase: "runtime", line: err.line, col: err.col, msg: err.msg }); return { ok: false, output, diagnostics }; } if (err instanceof ReturnSignal) { } else if (err instanceof BreakSignal) { } else { diagnostics.push({ kind: "error", phase: "runtime", line: 0, col: 0, msg: String(err && err.message ? err.message : err) }); return { ok: false, output, diagnostics }; } }
+  } catch (err: any) { if (err instanceof EvalErr) { diagnostics.push({ kind: "error", phase: "runtime", line: err.line, col: err.col, msg: err.msg }); return { ok: false, output, diagnostics }; } if (err instanceof ReturnSignal) { } else if (err instanceof BreakSignal) { } else if (err instanceof ContinueSignal) { } else { diagnostics.push({ kind: "error", phase: "runtime", line: 0, col: 0, msg: String(err && err.message ? err.message : err) }); return { ok: false, output, diagnostics }; } }
   return { ok: !diagnostics.some((d) => d.kind === "error"), output, diagnostics };
 }

@@ -1,0 +1,28 @@
+// While loop — sum numbers 0-9, with break and continue
+fn main() {
+    let mut i = 0
+    let mut sum = 0
+    while i < 10 {
+        sum = sum + i
+        i = i + 1
+    }
+    print("Sum: {sum}")
+    
+    // Break example
+    let mut n = 0
+    while true {
+        if n >= 5 { break }
+        n = n + 1
+    }
+    print("Broke at: {n}")
+    
+    // Continue example — sum odd numbers
+    let mut j = 0
+    let mut odd_sum = 0
+    while j < 10 {
+        j = j + 1
+        if j % 2 == 0 { continue }
+        odd_sum = odd_sum + j
+    }
+    print("Odd sum: {odd_sum}")
+}

@@ -1,0 +1,17 @@
+// Mutable state in closures — counter pattern
+fn main() {
+    let mut count = 0
+    
+    let inc = || { count = count + 1 }
+    let dec = || { count = count - 1 }
+    let reset = || { count = 0 }
+    
+    inc()
+    inc()
+    inc()
+    dec()
+    print("Count: {count}")  // 2
+    
+    reset()
+    print("After reset: {count}")  // 0
+}

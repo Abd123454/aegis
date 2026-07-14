@@ -235,26 +235,29 @@ describe("Adversarial review — Deep nesting causing RangeError (L12)", () => {
 
 describe("Adversarial review — Closure mutation (C1-C2)", () => {
   // C1: closure mutates captured variable (should be rejected, not silently no-op)
-  test("C1: closure mutation of captured variable is rejected", async () => {
+  test("C1: closure mutation of captured mut variable — now allowed (Phase 17 FIX 5)", async () => {
     const r = await run(`fn main() {
       let mut x = 0
       let f = || { x = x + 1 }
       f()
       print(x)
     }`);
-    expect(r.ok).toBe(false);
-    expect(r.diagnostics.some((d) => /captured|capture/i.test(d.msg))).toBe(true);
+    // Phase 17: mut variables CAN be mutated in closures (by design)
+    expect(r.ok).toBe(true);
+    expect(r.output[0]).toBe("1");
   });
 
   // C2: closure mutation via for-in variable
-  test("C2: closure mutation via lambda that assigns outer var", async () => {
+  test("C2: closure mutation via lambda — now allowed with mut (Phase 17)", async () => {
     const r = await run(`fn main() {
-      let total = 0
+      let mut total = 0
       let add = |n| { total = total + n }
-      [1, 2, 3].map(add)
+      let nums = [1, 2, 3]
+      nums.map(add)
       print(total)
     }`);
-    expect(r.ok).toBe(false);
+    expect(r.ok).toBe(true);
+    expect(r.output[0]).toBe("6");
   });
 });
 
