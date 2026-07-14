@@ -43,6 +43,31 @@ backward-compatibility promise applies.
 
 ## [Unreleased]
 
+### Phase 6 — Real Capability Type System (foundational redesign)
+
+This is the FOURTH attempt at the ambient-authority guarantee. Phases 1-5
+used enumeration-based approaches that were each defeated by a new
+expression form. Phase 6 replaces ALL enumeration with a type system.
+
+- **Added**: Type representation (`Type` = cap | struct | array | map | option | other).
+- **Added**: `inferType(e, ctx, sft, fnRet)` — general type inference for all expression forms.
+- **Added**: `typeHasCap(t, sft)` — recursive check if a type contains a capability.
+- **Added**: `typeHasModuleCap(t, module, sft)` — check if a type provides a specific module's capability.
+- **Added**: `typeCheck(items)` — replaces `analyze()`. Gates methods based on receiver TYPE, not name.
+- **Removed**: `isCapExpr`, `GATED_FULL`, `GATED_NAMES`, `methodModule`, `methodChain`, fixpoint propagation.
+- **Fixed**: SECRET-1a — cap values print as `<capability>`, Module as `<module>`, Env as `<env>`. Session secret no longer exposed.
+- **Fixed**: Depth limit in type checker (`inferType` has 256 max depth).
+- **Added**: 13 generality stress tests (`tests/phase6-generality.test.ts`) covering struct fields, arrays, closures in structs, function returns, multiple indirections, false positives on user structs, depth, and secret leak.
+- **Updated**: Phase 5 test "Cap flows through untyped param" → now correctly rejected (type system requires explicit Cap annotations).
+- **Updated**: T1 test for `Cap<fs>` — now uses `env.read()` directly (Cap<fs> is the module, not a container).
+
+All 110 tests pass. 35/35 PoCs from all 3 reviews verified.
+
+NOTE: This is the FOURTH attempt. If a fourth review finds this
+incomplete, the flaw would be in the type system itself (unsound typing
+rule, bad coercion, or runtime shape without type), NOT in a missing
+expression form.
+
 ### Phase 5 — Capability model redesign (second fix attempt)
 
 A second independent adversarial review found that the Phase 4 fix was

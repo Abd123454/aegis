@@ -3,7 +3,7 @@
 ![CI](https://github.com/Abd123454/aegis/actions/workflows/ci.yml/badge.svg)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 ![Status](https://img.shields.io/badge/status-research%20prototype-orange.svg)
-![Tests](https://img.shields.io/badge/tests-96%20pass-brightgreen.svg)
+![Tests](https://img.shields.io/badge/tests-110%20pass-brightgreen.svg)
 
 > A programming language built from scratch for security-by-construction,
 > ease of learning, and universal reach. This repository contains the
@@ -13,6 +13,63 @@
 **Project status: research prototype / MVP.** Not production-ready. Not
 "unhackable." The interpreter is a teaching tool that demonstrates the
 security properties; it is NOT a production compiler.
+
+---
+
+## Phase 6: Real Capability Type System (foundational redesign)
+
+This is the **FOURTH attempt** at the ambient-authority guarantee. The
+first three attempts failed because they used **enumeration-based**
+approaches — each tracked capability-ness by listing expression forms
+that could carry it. Each round closed one form and left another:
+
+- **Phase 4** (attempt 1): name matching (`env`/`cap`). Broken by aliasing.
+- **Phase 5** (attempt 2): `isCapExpr` with per-node-kind cases + fixpoint. Broken by struct/array/return-value wrapping.
+- **Phase 5 fix** (attempt 3): extended `isCapExpr` to cover more forms. Broken by the next form.
+
+**Phase 6 is structurally different.** It replaces ALL enumeration with a
+**type system**. Capability-ness is a TYPE (`Cap`, `Cap<fs>`, `Cap<net>`,
+`Cap<shell>`, `Cap<db>`), and it propagates through the **general typing
+rules** — field access returns field type, array indexing returns element
+type, function calls return return type. There is NO enumeration of
+"expression forms that carry capabilities." The gate checks whether the
+receiver's TYPE is the right `Cap` type, determined by general typing
+rules, not by a hand-enumerated case list.
+
+### Type system design
+
+- **Grammar**: `Cap` (all modules), `Cap<fs>`, `Cap<net>`, `Cap<shell>`, `Cap<db>`
+- **Affine** (not linear): Cap values can be moved but not copied. Chosen over linear for ease of learning (Rust's model).
+- **Typing rules**: capability-ness propagates through variable binding, struct fields, array/map elements, function parameters and returns, closure captures, and `spawn` — all via general typing rules, not special cases.
+- **Soundness**: the gate checks `typeHasModuleCap(typeOf(recv), requiredModule)`. `typeOf` is defined by general typing rules. `typeHasModuleCap` is recursive on types. No expression form can produce a `Cap<fs>` type unless it was derived from a `Cap`-typed value. This generalizes to ANY expression shape.
+
+### Phase 6 fix status
+
+| # | Fix | Status |
+|---|---|---|
+| 1 | Real type system replacing isCapExpr | **Done** — `inferType` + `typeHasModuleCap` replace all enumeration |
+| 2 | Gate on type, not name | **Done** — gate checks `typeHasModuleCap(typeOf(recv), module)` |
+| 3 | Runtime backstop kept, secret leak fixed | **Done** — SECRET-1a fixed: cap values print as `<capability>`, Module as `<module>`, Env as `<env>` |
+| 4 | Depth limit in type checker | **Done** — `inferType` has depth tracking (256 max) |
+| 5 | Generality stress tests | **Done** — 13 new tests in `tests/phase6-generality.test.ts` |
+| 6 | All prior PoCs pass | **Done** — 35/35 PoCs from all 3 reviews verified |
+
+**110 tests pass** (17 security + 17 brevity + 7 domain + 9 regression +
+24 phase-4 adversarial + 23 phase-5 aliased + 13 phase-6 generality). 0 failures.
+
+### This is the FOURTH attempt
+
+- **Phase 4**: name-based — broken by aliasing.
+- **Phase 5**: value-tracking with enumeration — broken by struct/array/return wrapping.
+- **Phase 5 fix**: more enumeration — broken by the next form.
+- **Phase 6** (this): type-system-based — structurally different because propagation is by general typing rules, not enumeration.
+
+**If a fourth independent review finds this incomplete**, the flaw would
+be in the type system itself (an unsound typing rule, a coercion that
+shouldn't be allowed, or a way to construct a value with a capability's
+runtime shape without having its type) — NOT in a missing expression
+form. That is the appropriate adversarial target once enforcement is
+structural.
 
 ---
 

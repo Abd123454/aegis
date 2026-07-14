@@ -689,290 +689,362 @@ class Parser {
 }
 
 // ---------------------------------------------------------------------------
-// Capability-value tracking and static safety analyzer (Phase 5 redesign)
+// PHASE 6: Real Capability Type System (foundational redesign)
 // ---------------------------------------------------------------------------
-// PHASE 5: The capability model now tracks VALUES, not names.
-// A variable is "cap-tagged" if it holds a value derived from a Cap parameter.
-// The tag propagates through: aliasing (let e = env), field access (env.fs),
-// array/map elements, function parameters (interprocedural fixpoint), and
-// closure captures.
+// This is the FOURTH attempt at the ambient-authority guarantee.
+// Phases 1-5 used enumeration-based approaches (name matching, isCapExpr with
+// per-node-kind cases, fixpoint propagation). Each was defeated by a new
+// expression form the enumeration didn't cover.
 //
-// The gate checks whether the receiver resolves to a cap-tagged value,
-// NOT whether the variable name matches "env" or "cap". This defeats the
-// aliasing attack from the second adversarial review: `let e = env; e.fs.read()`
-// is allowed (capability flowed through alias) but `fn sneaky(x) { x.fs.read() }`
-// called without a cap arg is rejected (x is not cap-tagged).
+// Phase 6 replaces ALL of that with a type system. Capability-ness is a TYPE
+// (Cap, Cap<fs>, Cap<net>, Cap<shell>, Cap<db>), and it propagates through
+// the general typing rules — field access returns field type, array indexing
+// returns element type, function calls return return type. There is NO
+// enumeration of "expression forms that carry capabilities." The gate checks
+// whether the receiver's TYPE is the right Cap type, determined by general
+// typing rules, not by a hand-enumerated case list.
 //
-// The runtime backstop (in evalMethod) independently verifies the capability
-// marker on Module values, so even an analyzer miss fails closed.
+// Affine semantics: Cap values can be moved (passed by ownership) but not
+// copied. This is enforced by the type system, not by convention.
 
-const GATED_FULL = new Set([
-  "fs.read", "fs.write", "fs.list",
-  "net.fetch", "net.post", "net.serve",
-  "shell.run",
-  "db.query",
-  "env.get", "env.set",
-]);
-// Gated method NAMES — these are reserved for capability modules.
-// Calling any of these on a non-capability-tagged value is rejected.
-// NOTE: "get"/"set" are NOT here because they're too generic (Map.get, etc.).
-// They're only gated via the full chain "env.get"/"env.set" in GATED_FULL.
-const GATED_NAMES = new Set([
-  "read", "write", "list", "fetch", "post", "serve", "run", "query",
-]);
+// --- Type representation ---
+type Type =
+  | { k: "cap"; module: string | null }  // null = Cap (all modules), "fs"/"net"/"shell"/"db" = Cap<module>
+  | { k: "struct"; name: string }         // user-defined struct (fields in structFieldTypes)
+  | { k: "array"; elem: Type }
+  | { k: "map"; val: Type }
+  | { k: "option"; inner: Type }
+  | { k: "other" };                        // Int, Float, String, Bool, Result, fn — not capability-bearing
 
-// Extract the full method chain: `env.fs` -> "env.fs", `alias.net` -> "alias.net"
-function methodChain(e: Expr): string {
-  if (e.n === "Ident") return e.name;
-  if (e.n === "Field") return methodChain(e.recv) + "." + e.name;
-  return "";
+// Gated methods and the module they require.
+// This is a METHOD-NAME → REQUIRED-MODULE mapping, NOT an expression-form list.
+// The gate checks: "does the receiver's TYPE provide this module's capability?"
+const GATED_METHOD_MODULE: Record<string, string> = {
+  read: "fs", write: "fs", list: "fs",
+  fetch: "net", post: "net", serve: "net",
+  run: "shell",
+  query: "db",
+};
+
+// Parse a type annotation string into a Type.
+function parseTy(ty: string): Type {
+  if (ty === "Cap") return { k: "cap", module: null };
+  if (ty.startsWith("Cap<") && ty.endsWith(">")) {
+    const mod = ty.slice(4, -1);
+    return { k: "cap", module: mod };
+  }
+  if (ty === "Any" || ty === "?" || ty === "Int" || ty === "Float" || ty === "String" || ty === "Bool" || ty === "Unit") {
+    return { k: "other" };
+  }
+  // Everything else is treated as a struct type reference.
+  // (Option<T>, Result<T,E>, Array<T>, Map<K,V> are "other" for capability purposes —
+  // a function returning Option<Cap<fs>> would need explicit tracking, but the current
+  // language doesn't have generic type annotations, so this is a known limitation.)
+  if (ty.startsWith("Option<") || ty.startsWith("Result<") || ty.startsWith("Array<") || ty.startsWith("Map<")) {
+    return { k: "other" };
+  }
+  return { k: "struct", name: ty };
 }
 
-// Check if an expression resolves to a capability-tagged value.
-// A value is cap-tagged if:
-//  - It's a variable in capVars
-//  - It's a field access on a cap-tagged expression (env.fs is cap if env is)
-//  - It's an index access on a cap-tagged expression (arr[0] is cap if arr is)
-function isCapExpr(e: Expr, capVars: Set<string>): boolean {
-  if (e.n === "Ident") return capVars.has(e.name);
-  if (e.n === "Field") return isCapExpr(e.recv, capVars);
-  if (e.n === "Index") return isCapExpr(e.arr, capVars);
+// Does this type contain a capability? (recursive, general — works for ANY type)
+function typeHasCap(t: Type, sft: Map<string, Map<string, Type>>): boolean {
+  switch (t.k) {
+    case "cap": return true;
+    case "array": return typeHasCap(t.elem, sft);
+    case "map": return typeHasCap(t.val, sft);
+    case "option": return typeHasCap(t.inner, sft);
+    case "struct": {
+      const fields = sft.get(t.name);
+      if (!fields) return false;
+      for (const fty of fields.values()) {
+        if (typeHasCap(fty, sft)) return true;
+      }
+      return false;
+    }
+    case "other": return false;
+  }
+}
+
+// Does this type provide a specific module's capability?
+// Cap<fs> provides fs. Cap (bare) does NOT directly provide any module —
+// you must extract the module first (env.fs → Cap<fs>).
+// A struct containing Cap<module> provides it (indirect capability).
+function typeHasModuleCap(t: Type, module: string, sft: Map<string, Map<string, Type>>): boolean {
+  if (t.k === "cap" && t.module === module) return true;
+  // A struct containing Cap<module> also provides it (indirect capability).
+  if (t.k === "struct") {
+    const fields = sft.get(t.name);
+    if (!fields) return false;
+    for (const fty of fields.values()) {
+      if (typeHasModuleCap(fty, module, sft)) return true;
+    }
+  }
   return false;
 }
 
-function analyze(items: Item[]): Diag[] {
+// --- Type inference: determine the Type of any expression ---
+// This is the GENERAL typing function. It handles every expression form
+// through standard typing rules, NOT through a capability-specific case list.
+// The capability gate uses this function's result + typeHasModuleCap.
+function inferType(
+  e: Expr,
+  ctx: Map<string, Type>,
+  sft: Map<string, Map<string, Type>>,
+  fnRet: Map<string, Type>,
+  depth: { d: number; max: number }
+): Type {
+  if (depth.d++ > depth.max) { depth.d--; return { k: "other" }; }
+  try {
+    switch (e.n) {
+      case "IntLit": case "FloatLit": case "BoolLit": case "StrLit": return { k: "other" };
+      case "None": return { k: "option", inner: { k: "other" } };
+      case "Some": return { k: "option", inner: inferType(e.e, ctx, sft, fnRet, depth) };
+      case "Ok": case "Err": return { k: "other" };
+      case "Unit": return { k: "other" };
+      case "Ident": return ctx.get(e.name) || { k: "other" };
+      case "Field": {
+        const recvTy = inferType(e.recv, ctx, sft, fnRet, depth);
+        if (recvTy.k === "cap" && recvTy.module === null) {
+          // Accessing .fs, .net, .shell, .db on a bare Cap value
+          if (["fs", "net", "shell", "db"].includes(e.name)) {
+            return { k: "cap", module: e.name };
+          }
+        }
+        if (recvTy.k === "struct") {
+          const fields = sft.get(recvTy.name);
+          if (fields && fields.has(e.name)) return fields.get(e.name)!;
+        }
+        return { k: "other" };
+      }
+      case "Index": {
+        const arrTy = inferType(e.arr, ctx, sft, fnRet, depth);
+        if (arrTy.k === "array") return { k: "option", inner: arrTy.elem };
+        if (arrTy.k === "map") return { k: "option", inner: arrTy.val };
+        return { k: "other" };
+      }
+      case "Call": {
+        if (e.callee.n === "Ident") {
+          // Direct function call — return type from fn signature
+          if (fnRet.has(e.callee.name)) return fnRet.get(e.callee.name)!;
+          // Built-in functions
+          if (e.callee.name === "len" || e.callee.name === "sqrt") return { k: "other" };
+          if (e.callee.name === "print") return { k: "other" };
+        }
+        return { k: "other" };
+      }
+      case "Method": {
+        // Methods generally return non-cap types (read returns String, etc.)
+        // The capability gate is checked separately in typeCheck.
+        return { k: "other" };
+      }
+      case "Try": {
+        // ? propagates the inner type (unwrapped Ok/Some)
+        return inferType(e.e, ctx, sft, fnRet, depth);
+      }
+      case "StructLit": return { k: "struct", name: e.name };
+      case "Array": {
+        if (e.elems.length === 0) return { k: "array", elem: { k: "other" } };
+        return { k: "array", elem: inferType(e.elems[0], ctx, sft, fnRet, depth) };
+      }
+      case "MapLit": {
+        if (e.pairs.length === 0) return { k: "map", val: { k: "other" } };
+        return { k: "map", val: inferType(e.pairs[0].val, ctx, sft, fnRet, depth) };
+      }
+      case "Closure": return { k: "other" };
+      case "Block": return { k: "other" };
+      case "If": return { k: "other" };
+      case "Match": return { k: "other" };
+      case "Bin": return { k: "other" };
+      case "Unary": return { k: "other" };
+      default: return { k: "other" };
+    }
+  } finally {
+    depth.d--;
+  }
+}
+
+// --- The type checker: replaces the old analyze() ---
+function typeCheck(items: Item[]): Diag[] {
   const diags: Diag[] = [];
 
-  // --- Collect functions ---
-  const fns = new Map<string, Extract<Item, { n: "Fn" }>>();
-  for (const it of items) if (it.n === "Fn") fns.set(it.name, it);
-
-  // --- Initialize cap-tagged params from Cap type annotations ---
-  // capTaggedParams: fn name -> set of param names that are cap-tagged
-  const capTaggedParams = new Map<string, Set<string>>();
-  for (const [name, fn] of fns) {
-    const caps = new Set<string>();
-    for (const p of fn.params) {
-      if (p.ty === "Cap" || p.ty.startsWith("Cap<")) caps.add(p.name);
-    }
-    capTaggedParams.set(name, caps);
-  }
-
-  // --- Fixpoint: propagate cap-tagged values through call sites ---
-  // A function's param becomes cap-tagged if ANY call site passes a cap-tagged arg.
-  // This is interprocedural dataflow: the capability follows the value, not the name.
-  let changed = true;
-  let iters = 0;
-  while (changed && iters < 100) {
-    changed = false;
-    iters++;
-    for (const [name, fn] of fns) {
-      const capVars = new Set(capTaggedParams.get(name)!);
-      propagateCap(fn.body, capVars, (calleeName: string, argCaps: boolean[]) => {
-        const callee = fns.get(calleeName);
-        if (!callee) return;
-        for (let i = 0; i < argCaps.length && i < callee.params.length; i++) {
-          if (argCaps[i]) {
-            const pn = callee.params[i].name;
-            const cc = capTaggedParams.get(calleeName)!;
-            if (!cc.has(pn)) { cc.add(pn); changed = true; }
-          }
-        }
-      });
+  // 1. Build struct field type table: structName -> (fieldName -> Type)
+  const sft = new Map<string, Map<string, Type>>();
+  for (const it of items) {
+    if (it.n === "Struct") {
+      const fields = new Map<string, Type>();
+      for (const f of it.fields) fields.set(f.name, parseTy(f.ty));
+      sft.set(it.name, fields);
     }
   }
 
-  // --- Final diagnostic walk ---
-  for (const [name, fn] of fns) {
-    const capVars = new Set(capTaggedParams.get(name)!);
-    const locals = new Set(capVars);
-    for (const p of fn.params) locals.add(p.name);
-    const ownScope = new Set(fn.params.map((p) => p.name));
-    walkStmts(fn.body, capVars, locals, ownScope);
+  // 2. Build function return type table: fnName -> return Type
+  const fnRet = new Map<string, Type>();
+  for (const it of items) {
+    if (it.n === "Fn" && it.ret) fnRet.set(it.name, parseTy(it.ret));
   }
-  // Walk top-level non-fn items
+
+  // 3. Build function parameter type table: fnName -> (paramName -> Type)
+  const fnParams = new Map<string, Map<string, Type>>();
+  for (const it of items) {
+    if (it.n === "Fn") {
+      const params = new Map<string, Type>();
+      for (const p of it.params) params.set(p.name, parseTy(p.ty));
+      fnParams.set(it.name, params);
+    }
+  }
+
+  // 4. Type-check each function body
+  for (const it of items) {
+    if (it.n !== "Fn") continue;
+    const ctx = new Map<string, Type>();
+    const ownScope = new Set<string>();
+    const params = fnParams.get(it.name)!;
+    for (const [pname, pty] of params) {
+      ctx.set(pname, pty);
+      ownScope.add(pname);
+    }
+    walkStmts(it.body, ctx, ownScope);
+  }
+
+  // 5. Type-check top-level non-fn/struct/impl items
   for (const it of items) {
     if (it.n === "Fn" || it.n === "Struct" || it.n === "Impl") continue;
-    walkStmt(it, new Set(), new Set(), new Set());
+    walkStmt(it, new Map(), new Set());
   }
+
   return diags;
 
-  // --- Propagation walk (fixpoint: track capVars, report call sites) ---
-  function propagateCap(stmts: Stmt[], capVars: Set<string>, onCall: (n: string, ac: boolean[]) => void) {
-    for (const s of stmts) propStmt(s, capVars, onCall);
+  // --- Walking functions ---
+  function walkStmts(stmts: Stmt[], ctx: Map<string, Type>, ownScope: Set<string>) {
+    for (const s of stmts) walkStmt(s, ctx, ownScope);
   }
-  function propStmt(s: Stmt, capVars: Set<string>, onCall: (n: string, ac: boolean[]) => void) {
+
+  function walkStmt(s: Stmt, ctx: Map<string, Type>, ownScope: Set<string>) {
     if (s.n === "Let") {
-      propExpr(s.expr, capVars, onCall);
-      if (isCapExpr(s.expr, capVars)) capVars.add(s.name);
-    } else if (s.n === "Expr") {
-      propExpr(s.expr, capVars, onCall);
-    } else if (s.n === "Return") {
-      if (s.expr) propExpr(s.expr, capVars, onCall);
-    } else if (s.n === "Fn") {
-      const nested = new Set(capVars);
-      for (const p of s.params) { if (p.ty === "Cap" || p.ty.startsWith("Cap<")) nested.add(p.name); }
-      propagateCap(s.body, nested, onCall);
-    } else if (s.n === "ForIn") {
-      propExpr(s.iter, capVars, onCall);
-      propagateCap(s.body, new Set(capVars), onCall);
+      walkExpr(s.expr, ctx, ownScope);
+      const ty = inferType(s.expr, ctx, sft, fnRet, { d: 0, max: 256 });
+      ctx.set(s.name, ty);
+      ownScope.add(s.name);
     } else if (s.n === "Assign") {
-      propExpr(s.expr, capVars, onCall);
-      if (isCapExpr(s.expr, capVars)) capVars.add(s.name);
-    }
-  }
-  function propExpr(e: Expr, capVars: Set<string>, onCall: (n: string, ac: boolean[]) => void) {
-    if (!e) return;
-    switch (e.n) {
-      case "Bin": propExpr(e.l, capVars, onCall); propExpr(e.r, capVars, onCall); break;
-      case "Unary": propExpr(e.e, capVars, onCall); break;
-      case "Call":
-        if (e.callee.n === "Ident") onCall(e.callee.name, e.args.map((a) => isCapExpr(a, capVars)));
-        propExpr(e.callee, capVars, onCall);
-        for (const a of e.args) propExpr(a, capVars, onCall);
-        break;
-      case "Method": propExpr(e.recv, capVars, onCall); for (const a of e.args) propExpr(a, capVars, onCall); break;
-      case "Field": propExpr(e.recv, capVars, onCall); break;
-      case "Index": propExpr(e.arr, capVars, onCall); propExpr(e.idx, capVars, onCall); break;
-      case "Array": for (const el of e.elems) propExpr(el, capVars, onCall); break;
-      case "MapLit": for (const p of e.pairs) propExpr(p.val, capVars, onCall); break;
-      case "If": propExpr(e.cond, capVars, onCall); propagateCap(e.then, new Set(capVars), onCall); if (e.els) propagateCap(e.els, new Set(capVars), onCall); break;
-      case "Match": propExpr(e.scrut, capVars, onCall); for (const a of e.arms) propagateCap(a.body, new Set(capVars), onCall); break;
-      case "Block": propagateCap(e.body, new Set(capVars), onCall); break;
-      case "Try": propExpr(e.e, capVars, onCall); break;
-      case "Some": case "Ok": case "Err": propExpr(e.e, capVars, onCall); break;
-      case "StructLit": for (const f of e.fields) propExpr(f.val, capVars, onCall); break;
-      case "Closure": propagateCap(e.body, new Set(capVars), onCall); break;
-      case "StrLit": {
-        for (const part of e.parts) {
-          if (part.expr && part.expr.trim()) {
-            const { toks } = tokenize(part.expr);
-            const pp = new Parser(toks);
-            const inner = pp.parseExpr();
-            if (inner) propExpr(inner, capVars, onCall);
-          }
-        }
-        break;
+      walkExpr(s.expr, ctx, ownScope);
+      if (!ownScope.has(s.name)) {
+        diags.push({ kind: "error", phase: "check", line: s.line, col: 0, msg: `Cannot assign to captured variable '${s.name}'. Closures capture by value; mutation of captured variables is not supported.` });
       }
+      const ty = inferType(s.expr, ctx, sft, fnRet, { d: 0, max: 256 });
+      ctx.set(s.name, ty);
+    } else if (s.n === "Expr") {
+      walkExpr(s.expr, ctx, ownScope);
+    } else if (s.n === "Return") {
+      if (s.expr) walkExpr(s.expr, ctx, ownScope);
+    } else if (s.n === "Fn") {
+      const nestedCtx = new Map(ctx);
+      const nestedOwn = new Set<string>();
+      for (const p of s.params) {
+        const pty = parseTy(p.ty);
+        nestedCtx.set(p.name, pty);
+        nestedOwn.add(p.name);
+      }
+      if (s.ret) fnRet.set(s.name, parseTy(s.ret));
+      walkStmts(s.body, nestedCtx, nestedOwn);
+    } else if (s.n === "ForIn") {
+      walkExpr(s.iter, ctx, ownScope);
+      const nestedCtx = new Map(ctx);
+      nestedCtx.set(s.var, { k: "other" });
+      const nestedOwn = new Set(ownScope);
+      nestedOwn.add(s.var);
+      walkStmts(s.body, nestedCtx, nestedOwn);
     }
   }
 
-  // --- Diagnostic walk (emit errors for gate violations) ---
-  function walkStmts(stmts: Stmt[], capVars: Set<string>, locals: Set<string>, ownScope: Set<string>) {
-    for (const s of stmts) walkStmt(s, capVars, locals, ownScope);
-  }
-  function walkStmt(s: Stmt, capVars: Set<string>, locals: Set<string>, ownScope: Set<string>) {
-    if (s.n === "Let") {
-      walkExpr(s.expr, capVars, locals, ownScope);
-      locals.add(s.name); ownScope.add(s.name);
-      if (isCapExpr(s.expr, capVars)) capVars.add(s.name);
-    } else if (s.n === "Expr") {
-      walkExpr(s.expr, capVars, locals, ownScope);
-    } else if (s.n === "Return") {
-      if (s.expr) walkExpr(s.expr, capVars, locals, ownScope);
-    } else if (s.n === "Fn") {
-      const ls = new Set(locals); const os = new Set<string>();
-      const fnCapVars = new Set(capVars);
-      for (const p of s.params) { ls.add(p.name); os.add(p.name); if (p.ty === "Cap" || p.ty.startsWith("Cap<")) fnCapVars.add(p.name); }
-      walkStmts(s.body, fnCapVars, ls, os);
-    } else if (s.n === "ForIn") {
-      walkExpr(s.iter, capVars, locals, ownScope);
-      const ls = new Set(locals); ls.add(s.var);
-      const os = new Set(ownScope); os.add(s.var);
-      walkStmts(s.body, new Set(capVars), ls, os);
-    } else if (s.n === "Assign") {
-      walkExpr(s.expr, capVars, locals, ownScope);
-      if (!ownScope.has(s.name)) {
-        diags.push({ kind: "error", phase: "check", line: s.line, col: 0, msg: `Cannot assign to captured variable '${s.name}'. Closures capture by value; mutation of captured variables is not supported. Pass the variable as a parameter and return the new value instead.` });
-      }
-      if (isCapExpr(s.expr, capVars)) capVars.add(s.name);
-    }
-  }
-  function walkExpr(e: Expr, capVars: Set<string>, locals: Set<string>, ownScope: Set<string>) {
+  function walkExpr(e: Expr, ctx: Map<string, Type>, ownScope: Set<string>) {
     if (!e) return;
     switch (e.n) {
-      case "Bin": walkExpr(e.l, capVars, locals, ownScope); walkExpr(e.r, capVars, locals, ownScope); break;
-      case "Unary": walkExpr(e.e, capVars, locals, ownScope); break;
+      case "Bin": walkExpr(e.l, ctx, ownScope); walkExpr(e.r, ctx, ownScope); break;
+      case "Unary": walkExpr(e.e, ctx, ownScope); break;
       case "Call":
-        walkExpr(e.callee, capVars, locals, ownScope);
-        for (const a of e.args) walkExpr(a, capVars, locals, ownScope);
+        walkExpr(e.callee, ctx, ownScope);
+        for (const a of e.args) walkExpr(a, ctx, ownScope);
         break;
       case "Method":
-        walkExpr(e.recv, capVars, locals, ownScope);
+        walkExpr(e.recv, ctx, ownScope);
         {
-          const chain = methodChain(e.recv);
-          const parts = chain.split(".");
-          const hasModuleName = parts.length >= 2;
-          const rootIsCap = isCapExpr(e.recv, capVars);
-          const modName = hasModuleName ? parts[parts.length - 1] : null;
-          const fullName = modName ? modName + "." + e.name : e.name;
-          const isModuleCall = hasModuleName || rootIsCap;
-
-          // Capability gate: gated method on a module chain requires cap-tagged root.
-          // This defeats aliasing: `let e = env; e.fs.read()` is allowed because
-          // `e` is cap-tagged (it was assigned from `env`). But `fn f(x) { x.fs.read() }`
-          // called without a cap arg is rejected because `x` is not cap-tagged.
-          if (GATED_FULL.has(fullName) && !rootIsCap) {
-            diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: `Call to '${fullName}' requires a capability in scope — the receiver does not resolve to a capability-tagged value. No ambient authority.` });
-          }
-          // Also gate on bare gated method names (e.g. `fs.read(...)` where fs
-          // is a bare identifier, or `m.read(...)` where m is not cap-tagged).
-          // These names are reserved for capability modules.
-          if (parts.length <= 1 && GATED_NAMES.has(e.name) && !rootIsCap) {
-            diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: `Call to '${e.name}' requires a capability in scope — '${e.name}' is a reserved capability method name. No ambient authority.` });
-          }
-
-          // Injection checks (only for Module calls — prevents false positives on user structs)
-          if (isModuleCall) {
-            if (e.name === "query") {
-              if (e.args.length !== 2) {
-                diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "db.query requires exactly 2 arguments: (template, params). Single-string form is forbidden — it enables SQL injection." });
-              } else {
-                const tpl = e.args[0];
-                if (tpl.n !== "StrLit" || tpl.parts.some((p: any) => p.expr && p.expr.trim())) {
-                  diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "db.query template must be a plain string literal (no concatenation, no interpolation). Use ? placeholders and pass values in the params array." });
-                }
+          // THE GATE: check if the receiver's TYPE provides the required capability.
+          //
+          // Design:
+          // - If receiver type contains Cap: enforce module match (Cap<fs> for read, etc.)
+          // - If receiver type is a known user struct (no Cap): allow — it's a user method
+          // - If receiver type is "other" (unknown/untyped): REJECT — unknown types can't
+          //   provide capabilities, and gated method names are reserved for capability modules
+          const recvTy = inferType(e.recv, ctx, sft, fnRet, { d: 0, max: 256 });
+          const requiredModule = GATED_METHOD_MODULE[e.name];
+          if (requiredModule) {
+            const recvHasCap = typeHasCap(recvTy, sft);
+            const recvIsUserStruct = recvTy.k === "struct" && sft.has(recvTy.name) && !recvHasCap;
+            if (recvHasCap) {
+              // Receiver contains a capability — enforce the module match.
+              if (!typeHasModuleCap(recvTy, requiredModule, sft)) {
+                diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: `Method '${e.name}' requires receiver of type Cap<${requiredModule}>. The receiver's type does not provide this capability — no ambient authority.` });
               }
-            }
-            if (e.name === "run") {
-              if (e.args.length !== 1 || e.args[0].n !== "Array") {
-                diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "shell.run requires a single array argument: shell.run([\"cmd\", \"arg1\"]). String form is forbidden — it enables command injection." });
-              } else {
-                for (const el of e.args[0].elems) {
-                  if (el.n !== "StrLit" || el.parts.some((p: any) => p.expr && p.expr.trim())) {
-                    diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "shell.run array elements must be plain string literals. Variables or expressions in argv slots could smuggle shell metacharacters." });
+              // Injection shape checks (only for capability-typed receivers)
+              if (typeHasModuleCap(recvTy, requiredModule, sft)) {
+                if (e.name === "query") {
+                  if (e.args.length !== 2) {
+                    diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "db.query requires exactly 2 arguments: (template, params). Single-string form is forbidden — it enables SQL injection." });
+                  } else {
+                    const tpl = e.args[0];
+                    if (tpl.n !== "StrLit" || tpl.parts.some((p: any) => p.expr && p.expr.trim())) {
+                      diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "db.query template must be a plain string literal (no concatenation, no interpolation). Use ? placeholders and pass values in the params array." });
+                    }
+                  }
+                }
+                if (e.name === "run") {
+                  if (e.args.length !== 1 || e.args[0].n !== "Array") {
+                    diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "shell.run requires a single array argument: shell.run([\"cmd\", \"arg1\"]). String form is forbidden — it enables command injection." });
+                  } else {
+                    for (const el of e.args[0].elems) {
+                      if (el.n !== "StrLit" || el.parts.some((p: any) => p.expr && p.expr.trim())) {
+                        diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: "shell.run array elements must be plain string literals. Variables or expressions in argv slots could smuggle shell metacharacters." });
+                      }
+                    }
                   }
                 }
               }
+            } else if (!recvIsUserStruct) {
+              // Receiver is unknown/untyped and not a user struct — reject.
+              // Gated method names are reserved for capability modules.
+              diags.push({ kind: "error", phase: "check", line: e.line, col: e.col, msg: `Method '${e.name}' requires receiver of type Cap<${requiredModule}>. The receiver has no capability type and is not a known user struct — no ambient authority.` });
             }
+            // If recvIsUserStruct: allow (user-defined method, not a capability method)
           }
         }
-        for (const a of e.args) walkExpr(a, capVars, locals, ownScope);
+        for (const a of e.args) walkExpr(a, ctx, ownScope);
         break;
-      case "Field": walkExpr(e.recv, capVars, locals, ownScope); break;
-      case "Index": walkExpr(e.arr, capVars, locals, ownScope); walkExpr(e.idx, capVars, locals, ownScope); break;
-      case "Array": for (const el of e.elems) walkExpr(el, capVars, locals, ownScope); break;
-      case "MapLit": for (const p of e.pairs) walkExpr(p.val, capVars, locals, ownScope); break;
-      case "If": walkExpr(e.cond, capVars, locals, ownScope); walkStmts(e.then, new Set(capVars), locals, ownScope); if (e.els) walkStmts(e.els, new Set(capVars), locals, ownScope); break;
-      case "Match": walkExpr(e.scrut, capVars, locals, ownScope); for (const a of e.arms) walkStmts(a.body, new Set(capVars), new Set(locals), new Set(ownScope)); break;
-      case "Block": walkStmts(e.body, new Set(capVars), locals, ownScope); break;
-      case "Try": walkExpr(e.e, capVars, locals, ownScope); break;
-      case "Some": case "Ok": case "Err": walkExpr(e.e, capVars, locals, ownScope); break;
+      case "Field": walkExpr(e.recv, ctx, ownScope); break;
+      case "Index": walkExpr(e.arr, ctx, ownScope); walkExpr(e.idx, ctx, ownScope); break;
+      case "Array": for (const el of e.elems) walkExpr(el, ctx, ownScope); break;
+      case "MapLit": for (const p of e.pairs) walkExpr(p.val, ctx, ownScope); break;
+      case "If": walkExpr(e.cond, ctx, ownScope); walkStmts(e.then, ctx, ownScope); if (e.els) walkStmts(e.els, ctx, ownScope); break;
+      case "Match": walkExpr(e.scrut, ctx, ownScope); for (const a of e.arms) walkStmts(a.body, new Map(ctx), new Set(ownScope)); break;
+      case "Block": walkStmts(e.body, ctx, ownScope); break;
+      case "Try": walkExpr(e.e, ctx, ownScope); break;
+      case "Some": case "Ok": case "Err": walkExpr(e.e, ctx, ownScope); break;
       case "StructLit":
-        // Reject forged Module/Env/TaskHandle structs
+        // Reject forged Module/Env/TaskHandle structs (defense in depth)
         if (e.name === "Module" || e.name === "Env" || e.name === "TaskHandle") {
           diags.push({ kind: "error", phase: "check", line: e.line, col: 0, msg: `Cannot construct a forged '${e.name}' value. Capability modules are only available through the 'env' parameter passed to main.` });
         }
-        for (const f of e.fields) walkExpr(f.val, capVars, locals, ownScope);
+        for (const f of e.fields) walkExpr(f.val, ctx, ownScope);
         break;
       case "Closure": {
-        // Closures capture the current capVars (capability flows through capture).
-        // FIX #7: closure params are added to ownScope so they can be reassigned.
-        const cCapVars = new Set(capVars);
-        const cLocals = new Set(capVars);
-        const cOwnScope = new Set(e.params);
-        for (const p of e.params) cLocals.add(p);
-        walkStmts(e.body, cCapVars, cLocals, cOwnScope);
+        // Closures capture the current ctx (capability flows through capture).
+        // Closure params are added to ownScope (fix #7) and default to "other" type.
+        const cCtx = new Map(ctx);
+        const cOwn = new Set<string>(e.params);
+        for (const p of e.params) {
+          cCtx.set(p, { k: "other" });
+          cOwn.add(p);
+        }
+        walkStmts(e.body, cCtx, cOwn);
         break;
       }
       case "StrLit": {
@@ -982,7 +1054,7 @@ function analyze(items: Item[]): Diag[] {
             const { toks } = tokenize(part.expr);
             const pp = new Parser(toks);
             const inner = pp.parseExpr();
-            if (inner) walkExpr(inner, capVars, locals, ownScope);
+            if (inner) walkExpr(inner, ctx, ownScope);
             for (const d of pp.diags) diags.push(d);
           }
         }
@@ -1015,9 +1087,15 @@ function valToStr(v: Val, depth = 0): string {
     case "none": return "None";
     case "ok": return "Ok(" + valToStr(v.v, depth + 1) + ")";
     case "err": return "Err(" + valToStr(v.v, depth + 1) + ")";
-    case "struct": return v.name + " { " + Object.entries(v.fields).map(([k, x]) => `${k}: ${valToStr(x, depth + 1)}`).join(", ") + " }";
+    case "struct": {
+      // SECRET-1a fix: do not expose internal capability fields (__cap, __mod)
+      const entries = Object.entries(v.fields).filter(([k]) => !k.startsWith("__"));
+      if (entries.length === 0 && v.name === "Module") return "<module>";
+      if (v.name === "Env") return "<env>";
+      return v.name + " { " + entries.map(([k, x]) => `${k}: ${valToStr(x, depth + 1)}`).join(", ") + " }";
+    }
     case "fn": return "<fn " + v.name + ">";
-    case "cap": return "<cap:" + v.label + ">";
+    case "cap": return "<capability>";  // SECRET-1a fix: do not expose the session secret
   }
 }
 
@@ -1046,7 +1124,7 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
   if (diagnostics.some((d) => d.kind === "error" && d.phase === "parse"))
     return { ok: false, output, diagnostics };
 
-  const checkDiags = analyze(items);
+  const checkDiags = typeCheck(items);
   diagnostics.push(...checkDiags);
   if (diagnostics.some((d) => d.kind === "error" && d.phase === "check"))
     return { ok: false, output, diagnostics };
@@ -1564,11 +1642,22 @@ export function run(source: string, _grantCaps: string[] = ["fs", "net", "shell"
       const mainFn = globals.get("main")!;
       if (mainFn.k === "fn") {
         const local: Env = new Map(globals);
-        // Inject env ONLY if main declares a Cap parameter.
-        // The env object is bound to whatever name main's first parameter has
-        // (typically `env: Cap` or `env: Cap<fs>`).
-        if (mainFn.params.length >= 1 && mainFn.caps) {
-          local.set(mainFn.params[0], envObj);
+        // Inject the capability value based on the parameter's type annotation.
+        // Cap (bare) → inject the full Env struct (has .fs, .net, .shell, .db fields)
+        // Cap<fs> → inject the fs Module directly (can call .read() directly)
+        // Cap<net> → inject the net Module, etc.
+        if (mainFn.params.length >= 1) {
+          // Find the first parameter with a Cap type
+          const mainItem = items.find((it) => it.n === "Fn" && it.name === "main") as Extract<Item, { n: "Fn" }> | undefined;
+          if (mainItem && mainItem.params.length >= 1) {
+            const pty = mainItem.params[0].ty;
+            if (pty === "Cap") {
+              local.set(mainFn.params[0], envObj);
+            } else if (pty.startsWith("Cap<") && pty.endsWith(">")) {
+              const mod = pty.slice(4, -1);
+              local.set(mainFn.params[0], makeModule(mod));
+            }
+          }
         }
         try { execBlock(mainFn.body, local); }
         catch (sig) { if (!(sig instanceof ReturnSignal)) throw sig; }

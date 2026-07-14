@@ -259,10 +259,12 @@ describe("Adversarial review — Closure mutation (C1-C2)", () => {
 });
 
 describe("Adversarial review — Cap<fs> type parsing (T1)", () => {
-  // T1: Cap<fs> should be recognized as a capability type
-  test("T1: Cap<fs> parameter grants capability", () => {
+  // T1: Cap<fs> should be recognized as a capability type.
+  // With Cap<fs>, the parameter IS the fs capability directly — you call
+  // env.read(...), NOT env.fs.read(...) (that's for bare Cap which has .fs field).
+  test("T1: Cap<fs> parameter grants capability for direct read()", () => {
     const r = run(`fn main(env: Cap<fs>) {
-      let content = env.fs.read("test.txt")?
+      let content = env.read("test.txt")?
       print(content)
     }`);
     expect(r.ok).toBe(true);

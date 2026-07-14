@@ -231,9 +231,21 @@ describe("Phase 5: Interprocedural capability flow", () => {
     expect(r.ok).toBe(true);
   });
 
-  // Cap flows through non-Cap-typed param when cap is passed
-  test("Cap flows through untyped param when cap arg passed", () => {
+  // PHASE 6 CHANGE: Cap does NOT flow through untyped params.
+  // The type system requires explicit Cap annotations. `fn helper(x)` with
+  // no type annotation → x has type "other" → x.fs is a type error.
+  // This is the CORRECT behavior: functions must declare their capability
+  // requirements explicitly. This is structurally different from Phase 5's
+  // interprocedural fixpoint, which was defeated by the third review.
+  test("Cap does NOT flow through untyped param — requires explicit annotation", () => {
     const r = run(`fn helper(x) { x.fs.read("test")? }
+    fn main(env: Cap) { helper(env)? }`);
+    expect(r.ok).toBe(false);
+  });
+
+  // But DOES flow through an explicitly Cap-typed param
+  test("Cap flows through explicitly Cap-typed param", () => {
+    const r = run(`fn helper(x: Cap) { x.fs.read("test")? }
     fn main(env: Cap) { helper(env)? }`);
     expect(r.ok).toBe(true);
   });
