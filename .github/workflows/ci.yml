@@ -24,4 +24,4 @@ jobs:
         run: bun run lint
 
       - name: Run tests
-        run: bun test
+        run: AEGIS_MOCK_AI=1 bun test
